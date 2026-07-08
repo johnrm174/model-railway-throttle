@@ -144,7 +144,7 @@ class remote_dcc_throttle(Tk.LabelFrame):
                         log_message=f"Loco Control: Releasing session: {mqtt_message}")
             # We always assume the session has been released
             self.session_id = 0
-            self.session_response_received(self.session_id) ############################# NEED A response here
+            self.session_response_received(self.session_id)
             self.session_callback(self.session_id)
 
     #----------------------------------------------------------------------------------------------------
@@ -176,6 +176,9 @@ class remote_dcc_throttle(Tk.LabelFrame):
     #----------------------------------------------------------------------------------------------------
 
     def mqtt_connection_state_updated(self, connected:bool):
+        ###############################################################################################
+        ############## Need To cancel any scheduled timeout error events ##############################
+        ###############################################################################################
         self.mqtt_connected = connected
         if self.mqtt_connected:
             self.btn_mqtt.configure(text="MQTT: Connected", bg="#2ae1de", fg="black",
@@ -191,6 +194,9 @@ class remote_dcc_throttle(Tk.LabelFrame):
             self.btn_session.configure(state="disabled")
 
     def dcc_power_state_updated(self, dcc_power_state:bool):
+        ###############################################################################################
+        ############## Need To cancel any scheduled timeout error events ##############################
+        ###############################################################################################
         self.dcc_power_on = dcc_power_state
         if dcc_power_state:
             self.btn_dcc_power.configure(text="Track Power: ON", bg="#2ade7a", fg="white",
@@ -200,6 +206,9 @@ class remote_dcc_throttle(Tk.LabelFrame):
                                          activebackground=self.default_abg, activeforeground=self.default_afg)
             
     def session_response_received(self, session_id:int):
+        ###############################################################################################
+        ############## Need To cancel any scheduled timeout error events ##############################
+        ###############################################################################################
         self.session_id = session_id
         if self.session_id > 0:
             self.btn_session.configure(text="Release Session", bg="#de2a2a", fg="white",
@@ -207,6 +216,9 @@ class remote_dcc_throttle(Tk.LabelFrame):
         else:
             self.btn_session.configure(text="Get Session", bg=self.default_bg, fg=self.default_fg,
                                        activebackground=self.default_abg, activeforeground=self.default_afg)
+            ###############################################################################################
+            ############## Need a pop-up error to say "could not acquire session for DCC Address xxx ######
+            ###############################################################################################
         self.session_callback(self.session_id)
 
     #----------------------------------------------------------------------------------------------------
