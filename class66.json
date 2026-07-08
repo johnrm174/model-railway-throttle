@@ -1,0 +1,34 @@
+{
+    "locomotive": {
+        "loco_name": "Class 66",
+        "loco_mass_tonnes": 129,
+        "loco_horsepower": 3200,
+        "loco_max_speed_mph": 75,
+        "max_tractive_effort_lbf": 93000,
+        "traction_responsiveness": 0.01,
+        "brake_responsiveness": 0.03,
+        "dcc_address": 3,
+        "dcc_speed_scaling": 1.0,
+        "axle_offsets_ft": [
+            0.0,
+            8.5,
+            42.0,
+            50.5
+        ],
+        "fwd_stream_url": "http://192.168.1.149:8080",
+        "rev_stream_url": "http://192.168.1.149:8080"
+    },
+    "general_settings": {
+        "sound_enabled": true,
+        "log_level": 20
+    },
+    "mqtt_settings": {
+        "broker_host": "localhost",
+        "broker_port": 1883,
+        "broker_username": "",
+        "broker_password": "",
+        "network_identifier": "network",
+        "node_identifier": "thr1",
+        "connect_immediately": false
+    }
+}

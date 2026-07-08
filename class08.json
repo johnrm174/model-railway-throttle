@@ -1,0 +1,17 @@
+{
+    "loco_name": "Class 66",
+    "mass_tonnes": 60,
+    "max_speed_mph": 40,
+    "max_tractive_effort_lbf": 3000,
+    "traction_responsiveness": 0.01,
+    "brake_responsiveness": 0.03,
+    "dcc_address": 3,
+    "axle_offsets_feet": [
+        0.0,
+        8.5,
+        8.5
+    ],
+    "fwd_stream_url": "",
+    "rev_stream_url": "",
+    "sound_enabled": true
+}
