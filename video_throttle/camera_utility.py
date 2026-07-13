@@ -1,6 +1,5 @@
 ##### sudo apt install python3-yaml
 
-
 import copy
 import os
 import sys
@@ -17,10 +16,12 @@ import tkinter as Tk
 from tkinter import filedialog, messagebox, ttk
 from importlib import resources
 import serial.tools.list_ports
+from .widgets import dropdown_box, string_entry_box, check_box
 
 # -----------------------------------------------------------------------------
 # ESPHome YAML Wrapper
 # -----------------------------------------------------------------------------
+
 class ESPHomeYaml:
     def __init__(self, template_dictionary):
         self.template = copy.deepcopy(template_dictionary)
@@ -55,6 +56,24 @@ class ESPHomeYaml:
         self.data.setdefault("wifi", {})
         self.data["wifi"]["ssid"] = value
 
+    @property
+    def device_name(self):
+        return self.data.get("esphome", {}).get("name", "")
+
+    @device_name.setter
+    def device_name(self, value):
+        self.data.setdefault("esphome", {})
+        self.data["esphome"]["name"] = value
+
+    @property
+    def friendly_name(self):
+        return self.data.get("esphome", {}).get("friendly_name", "")
+
+    @friendly_name.setter
+    def friendly_name(self, value):
+        self.data.setdefault("esphome", {})
+        self.data["esphome"]["friendly_name"] = value
+        
     @property
     def password(self):
         return self.data.get("wifi", {}).get("password", "")
@@ -121,157 +140,6 @@ class ESPHomeYaml:
         self.data["esp32_camera"]["horizontal_mirror"] = bool(value)
 
 # -----------------------------------------------------------------------------
-# UI Helpers - tooltips and validation widgets
-# -----------------------------------------------------------------------------
-class ToolTip:
-    def __init__(self, widget, text):
-        self.widget = widget
-        self.text = text
-        self.tip = None
-        widget.bind("<Enter>", self.show)
-        widget.bind("<Leave>", self.hide)
-
-    def show(self, _event=None):
-        if self.tip or not self.text:
-            return
-        x = self.widget.winfo_rootx() + 20
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
-        self.tip = Tk.Toplevel(self.widget)
-        self.tip.wm_overrideredirect(True)
-        self.tip.wm_geometry(f"+{x}+{y}")
-        lbl = Tk.Label(self.tip, text=self.text, justify=Tk.LEFT,
-                       background="#ffffe0", relief=Tk.SOLID, borderwidth=1,
-                       font=("tahoma", "8", "normal"))
-        lbl.pack(ipadx=1)
-
-    def hide(self, _event=None):
-        if self.tip:
-            self.tip.destroy()
-            self.tip = None
-
-class StringEntryBox(Tk.Frame):
-    def __init__(self, parent, width=30, max_length=None, tooltip=None):
-        super().__init__(parent)
-        self.max_length = max_length
-        self.entry = Tk.Entry(self, width=width)
-        self.entry.pack(fill=Tk.X, expand=True)
-        self._fg = self.entry.cget("fg")
-        if tooltip:
-            ToolTip(self.entry, tooltip)
-
-        vcmd = (self.register(self._validate), "%P")
-        self.entry.config(validate="key", validatecommand=vcmd)
-
-    def _validate(self, proposed):
-        if self.max_length is not None and len(proposed) > self.max_length:
-            self.entry.config(fg="red")
-            return False
-        self.entry.config(fg=self._fg)
-        return True
-
-    def get(self):
-        return self.entry.get()
-
-    def set(self, value):
-        self.entry.delete(0, Tk.END)
-        self.entry.insert(0, "" if value is None else str(value))
-        # revalidate style
-        self.entry.config(fg=self._fg)
-
-    # For compatibility with existing code
-    def entry_box_updated(self):
-        pass
-
-    def cget(self, key):
-        if key == "fg":
-            return self.entry.cget("fg")
-        return self.entry.cget(key)
-
-class IntegerEntryBox(Tk.Frame):
-    def __init__(self, parent, width=8, min_val=None, max_val=None, tooltip=None):
-        super().__init__(parent)
-        self.min_val = min_val
-        self.max_val = max_val
-        self.entry = Tk.Entry(self, width=width, justify="right")
-        self.entry.pack(fill=Tk.X, expand=True)
-        self._fg = self.entry.cget("fg")
-        if tooltip:
-            ToolTip(self.entry, tooltip)
-        vcmd = (self.register(self._validate), "%P")
-        self.entry.config(validate="focusout", validatecommand=vcmd)
-
-    def _validate(self, proposed):
-        if proposed == "":
-            # empty considered invalid for now
-            self.entry.config(fg="red")
-            return False
-        try:
-            v = int(proposed)
-        except Exception:
-            self.entry.config(fg="red")
-            return False
-        if self.min_val is not None and v < self.min_val:
-            self.entry.config(fg="red")
-            return False
-        if self.max_val is not None and v > self.max_val:
-            self.entry.config(fg="red")
-            return False
-        self.entry.config(fg=self._fg)
-        return True
-
-    def get(self):
-        txt = self.entry.get()
-        try:
-            return int(txt)
-        except Exception:
-            return 0
-
-    def set(self, value):
-        self.entry.delete(0, Tk.END)
-        self.entry.insert(0, "" if value is None else str(int(value)))
-        self.entry.config(fg=self._fg)
-
-    def entry_box_updated(self):
-        # Force validation
-        self._validate(self.entry.get())
-
-    def cget(self, key):
-        if key == "fg":
-            return self.entry.cget("fg")
-        return self.entry.cget(key)
-
-class CheckBox(Tk.Frame):
-    def __init__(self, parent, width=30, label="", tooltip=None):
-        super().__init__(parent)
-        self.var = Tk.BooleanVar(value=False)
-        self.chk = Tk.Checkbutton(self, text=label, variable=self.var)
-        self.chk.pack(anchor="w")
-        if tooltip:
-            ToolTip(self.chk, tooltip)
-
-    def get(self):
-        return bool(self.var.get())
-
-    def set(self, value):
-        self.var.set(bool(value))
-
-    def cget(self, key):
-        # mimic a widget supporting cget('fg') even though we don't change it
-        if key == "fg":
-            return self.chk.cget("fg")
-        return self.chk.cget(key)
-
-# Factories used by CameraConfigWindow (keeps your original style)
-def string_entry_box(parent, **kwargs):
-    return StringEntryBox(parent, **kwargs)
-
-def integer_entry_box(parent, **kwargs):
-    return IntegerEntryBox(parent, **kwargs)
-
-def check_box(parent, **kwargs):
-    return CheckBox(parent, **kwargs)
-
-# -----------------------------------------------------------------------------
 # Camera Configuration Window
 # -----------------------------------------------------------------------------
 
@@ -320,14 +188,35 @@ class CameraConfigWindow(Tk.Toplevel):
                       ("Password:", string_entry_box, "password", {"max_length": 64, "tooltip": "Wireless password."}) ]
         self.render_fields(wifi_group, wifi_fields)
         #------------------------------------------------------------------------------------
+        # Device Metadata Group
+        #------------------------------------------------------------------------------------
+        metadata_group = Tk.LabelFrame(form_frame, text="Device Metadata", padx=10, pady=10)
+        metadata_group.pack(fill=Tk.X, pady=(0, 10))
+        metadata_fields = [
+            ("Device Name:", string_entry_box, "device_name", 
+             {"max_length": 10, "tooltip": "Device identifier (lowercase, no spaces, max 10 characters)"}),
+            ("Friendly Name:", string_entry_box, "friendly_name", 
+             {"max_length": 50, "tooltip": "Human-readable name"})]
+        self.render_fields(metadata_group, metadata_fields)
+        #------------------------------------------------------------------------------------
         # Camera Settings Group
         #------------------------------------------------------------------------------------
         camera_group = Tk.LabelFrame(form_frame, text="Camera Settings", padx=10, pady=10)
         camera_group.pack(fill=Tk.X)
-        camera_fields = [("Resolution:", string_entry_box, "resolution", {"max_length": 20, "tooltip": "Frame resolution (e.g. 640x480)"}),
-                         ("Frame Rate:", integer_entry_box, "frame_rate", {"min_val": 1, "max_val": 60, "tooltip": "Maximum camera frame rate."}),
-                         ("JPEG Quality:", integer_entry_box, "jpeg_quality", {"min_val": 10, "max_val": 63, "tooltip": "JPEG compression quality."}),
-                         ("Frame Buffers:", integer_entry_box, "frame_buffers", {"min_val": 1, "max_val": 4, "tooltip": "Number of camera frame buffers."})]
+        
+        # Standard ESP32-CAM resolutions supported by ESPHome
+        RESOLUTION_OPTIONS = [ "1600x1200", "1280x1024", "1024x768", "800x600", 
+                            "640x480", "400x296", "320x240", "240x176", "160x120"]
+        # Standard frame rates (in fps)
+        FRAME_RATE_OPTIONS = ["1", "5", "10", "15", "20", "25", "30", "60"]
+        # JPEG Quality choices (lower numbers mean higher quality, 10 is excellent, 63 is lowest)
+        JPEG_QUALITY_OPTIONS = [str(i) for i in range(10, 64, 5)] # Generates 10, 15, 20... 60, 63
+        # Typical PSRAM frame buffers (higher values allow higher resolutions/framerates)
+        FRAME_BUFFER_OPTIONS = ["1", "2", "3", "4"]
+        camera_fields = [("Resolution:", dropdown_box, "resolution", {"values": RESOLUTION_OPTIONS, "tooltip": "Frame resolution (UXGA down to QQVGA)"}),
+                         ("Frame Rate:", dropdown_box, "frame_rate", {"values": FRAME_RATE_OPTIONS, "tooltip": "Maximum camera frame rate (fps)"}),
+                         ("JPEG Quality:", dropdown_box, "jpeg_quality", {"values": JPEG_QUALITY_OPTIONS, "tooltip": "JPEG quality (10 is best quality, 63 is lowest)"}),
+                         ("Frame Buffers:", dropdown_box, "frame_buffers", {"values": FRAME_BUFFER_OPTIONS, "tooltip": "Number of camera frame buffers in PSRAM"})]
         self.render_fields(camera_group, camera_fields)
         self.vflip = check_box(camera_group, width=30, label="Vertical Flip", tooltip="Flip image vertically.")
         self.vflip.grid(row=4, column=0, columnspan=2, sticky="w", pady=(8,0))
@@ -514,7 +403,7 @@ class CameraConfigWindow(Tk.Toplevel):
                 messagebox.showerror("Save Failed", str(ex))
                 return
 
-        device = self.device_entry.get().strip()
+        device = self.device_combobox.get().strip()
         if device == "":
             resp = messagebox.askyesno("No device specified", "No device port specified. Do you want to run 'esphome run' and choose device interactively? (No upload will occur without a device.)")
             if not resp:

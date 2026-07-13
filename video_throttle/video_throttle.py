@@ -181,9 +181,9 @@ class ThrottleApplication(Tk.Tk):
                 self.dcc_throttle.update_loco_dcc_address(final_config["locomotive"]["dcc_address"])
                 self.dcc_throttle.update_parameters(**final_config["mqtt_settings"])
                 # Connect to the broker on file load if requested
-                if final_config["general_settings"]["connect_immediately"]: dcc_throttle.mqtt_broker_connect()
+                if final_config["general_settings"]["connect_immediately"]: self.dcc_throttle.mqtt_broker_connect()
                 # Update the logging level
-                logging.getLogger().setLevel(default_config["general_settings"]["log_level"])
+                logging.getLogger().setLevel(final_config["general_settings"]["log_level"])
                 # Expand/shrink the window as appropriate (to pack/forget the video stream)
                 self.adjust_window_geometry()
 
@@ -194,7 +194,7 @@ class ThrottleApplication(Tk.Tk):
         if file_path:
             try:
                 with open(file_path, 'w') as f:
-                    json.dump(self.current_loco_configuration, f, indent=4)
+                    json.dump(self.current_configuration, f, indent=4)
                 messagebox.showinfo("Success", "Locomotive configuration saved successfully.")
             except Exception as e:
                 messagebox.showerror("Save Error", f"Failed to write file:\n{str(e)}")

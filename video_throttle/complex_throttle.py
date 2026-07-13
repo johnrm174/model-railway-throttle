@@ -111,9 +111,9 @@ class complex_throttle(Tk.LabelFrame):
         self.root_window = root_window
         # --- UI Sub-Component: Cab Video Frame ---
         self.video_frame = Tk.Frame(self, bg="black", width=480, height=270)
-        self.video_screen = Tk.Label(self.video_frame, text="Select Direction to Start Video", 
-                                     fg="white", bg="black", width=60, height=15)
+        self.video_screen = Tk.Canvas(self.video_frame, bg="black", width=480, height=270, highlightthickness=0)
         self.video_screen.pack(fill=Tk.BOTH, expand=True)
+        self.video_screen_text_id = None  # Track text element for updates
         self.video_button_frame = Tk.Frame(self.video_frame, bg="black")
         self.video_button_frame.place(x=0, y=220, width=480, height=30)
         # Bottom-left REV button
@@ -192,6 +192,7 @@ class complex_throttle(Tk.LabelFrame):
         self.video_capture = None
         self.video_running = False
         self.video_direction = None
+        self.video_photo = None
         # Locomotive Active State Placeholders
         self.loco_name = ""
         self.loco_mass = 0
@@ -250,7 +251,8 @@ class complex_throttle(Tk.LabelFrame):
         self.brake_demand.set(100)  
         self.dcc_direction = None
         self.update_direction_button_visuals()
-        self.video_screen.configure(image="", text="Select Direction to Start Video")
+        self.video_screen.delete("all")  # Clear canvas instead of configure
+        self.video_screen.create_text(240, 135, text="Select Direction to Start Video", fill="white", font=("Arial", 12))
         # Reset the dials to their default states
         self.speed_dial.update_dial(0)
         self.power_dial.update_dial(0)
@@ -263,17 +265,6 @@ class complex_throttle(Tk.LabelFrame):
         self.btn_fwd.configure(state=state_val)
         self.btn_rev.configure(state=state_val)
         self.btn_estop.configure(state=state_val)
-
-    def cleanup_video(self):
-        # Clean up video stream capture threads
-        if self.video_capture:
-            self.video_capture.release()
-            self.video_capture = None
-        # Cancel video frame loop safely
-        if self.next_video_loop_event: 
-            try: self.after_cancel(self.next_video_loop_event)
-            except Exception: pass
-            self.next_video_loop_event = None
         
     #----------------------------------------------------------------------------------------------------
     # Callback Function to update the load mass (and hence the total mass) of the train
@@ -306,27 +297,8 @@ class complex_throttle(Tk.LabelFrame):
             self.audio_stream = None
 
     #----------------------------------------------------------------------------------------------------
-    # Callback to handle direction changes (in terms of button states and video feed)
+    # Callback to handle locomotive direction changes (in terms of button states and video feed)
     #----------------------------------------------------------------------------------------------------
-
-    def set_video_direction(self, direction:bool):
-        if self.video_direction == direction:
-            self.video_direction = None
-        else:
-            self.video_direction = direction
-        self.update_video_button_visuals()
-        self.update_video_stream_source()
-
-    def update_video_button_visuals(self):
-        if self.video_direction is True:  # FWD
-            self.video_btn_fwd.configure(bg="#2a7ade", relief=Tk.SUNKEN)
-            self.video_btn_rev.configure(bg="#444444", relief=Tk.RAISED)
-        elif self.video_direction is False:  # REV
-            self.video_btn_rev.configure(bg="#2a7ade", relief=Tk.SUNKEN)
-            self.video_btn_fwd.configure(bg="#444444", relief=Tk.RAISED)
-        else:
-            self.video_btn_fwd.configure(bg="#444444", relief=Tk.RAISED)
-            self.video_btn_rev.configure(bg="#444444", relief=Tk.RAISED)
 
     def set_direction(self, direction):
         if self.dcc_direction == direction:
@@ -350,45 +322,119 @@ class complex_throttle(Tk.LabelFrame):
             self.btn_fwd.configure(bg="lightgray", fg="black")
             self.btn_rev.configure(bg="lightgray", fg="black")
 
+    #----------------------------------------------------------------------------------------------------
+    # Callback to handle video direction changes (in terms of button states and video feed)
+    #----------------------------------------------------------------------------------------------------
+
+    def set_video_direction(self, direction:bool):
+        if self.video_direction == direction:
+            self.video_direction = None
+        else:
+            self.video_direction = direction
+        self.update_video_button_visuals()
+        self.update_video_stream_source()
+
+    def update_video_button_visuals(self):
+        if self.video_direction is True:  # FWD
+            self.video_btn_fwd.configure(bg="#2a7ade", relief=Tk.SUNKEN)
+            self.video_btn_rev.configure(bg="#444444", relief=Tk.RAISED)
+        elif self.video_direction is False:  # REV
+            self.video_btn_rev.configure(bg="#2a7ade", relief=Tk.SUNKEN)
+            self.video_btn_fwd.configure(bg="#444444", relief=Tk.RAISED)
+        else:
+            self.video_btn_fwd.configure(bg="#444444", relief=Tk.RAISED)
+            self.video_btn_rev.configure(bg="#444444", relief=Tk.RAISED)
+
     # --- Asynchronous Video Connection Methods ---
     # These functions shift the high latency RTSP/HTTP network lookup out of the UI pipeline.
     
     def async_connect_video(self, url):
         try:
             cap = cv2.VideoCapture(url)
-            # Set minimal buffering to reduce latency
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            # Push assignment and playback scheduling back onto the main Tk thread safely
             if cap.isOpened():
                 self.root_window.after(0, lambda: self.on_video_connected(cap))
             else:
                 self.root_window.after(0, lambda: self.video_screen.configure(text="Error: Could not open Video Stream"))
         except Exception as e:
             self.root_window.after(0, lambda: self.video_screen.configure(text=f"Video Connection Error: {e}"))
-
+    
     def on_video_connected(self, capture_object):
+        if not self.video_running:
+            # Stream was cancelled before connection completed
+            capture_object.release()
+            return
         self.video_capture = capture_object
-        self.video_running = True
         self.update_video_stream()
 
     def update_video_stream_source(self):
-        self.video_running = False
-        self.cleanup_video()
-        self.video_screen.configure(image="")
+        if self.video_running:
+            self.video_running = False
+            self.cleanup_video()
+        self.video_screen.delete("all")  # Clear canvas
         if self.video_direction is None:
-            self.video_screen.configure(text="Select Direction to Start Video")
+            self.video_screen.create_text(240, 135, text="Select Direction to Start Video", 
+                                          fill="white", font=("Arial", 12))
             return
-        # Unified True/False checks to eliminate directional integer string mismatches
         target_url = self.fwd_stream_url if self.video_direction is True else self.rev_stream_url
         direction_name = "Forward" if self.video_direction is True else "Reverse"
         if not target_url:
-            self.video_screen.configure(text=f"No video stream URL specified for {direction_name}")
+            self.video_screen.create_text(240, 135, 
+                                          text=f"No video stream URL specified for {direction_name}", 
+                                          fill="white", font=("Arial", 12))
             return
         if video_streaming_enabled:
-            self.video_screen.configure(text="Connecting to Cab View...")
-            # Spin up connection via background daemon thread to bypass lockups if cameras go dark
+            self.video_screen.create_text(240, 135, text="Connecting to Cab View...", 
+                                          fill="orange", font=("Arial", 12))
+            self.video_running = True
             threading.Thread(target=self.async_connect_video, args=(target_url,), daemon=True).start()
-            
+    
+    def cleanup_video(self):
+        # Clean up video stream capture threads
+        if self.video_capture:
+            self.video_capture.release()
+            self.video_capture = None
+        # Cancel video frame loop safely
+        if self.next_video_loop_event: 
+            try: self.after_cancel(self.next_video_loop_event)
+            except Exception: pass
+            self.next_video_loop_event = None
+
+    #----------------------------------------------------------------------------------------------------
+    # This is the video processing loop
+    #----------------------------------------------------------------------------------------------------
+
+    def update_video_stream(self):
+        if not self.video_running or self.video_capture is None:
+            return
+        try:
+            if self.video_capture.grab():
+                ret, frame = self.video_capture.retrieve()
+                if ret and frame is not None:
+                    frame = cv2.resize(frame, (480, 270))
+                    cv2image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    img = Image.fromarray(cv2image)
+                    img_tk = ImageTk.PhotoImage(image=img)
+                    try:
+                        self.video_screen.create_image(0, 0, anchor=Tk.NW, image=img_tk)
+                        self.video_screen.image = img_tk  # Keep reference alive
+                    except Exception as e:
+                        logging.warning(f"Failed to update video canvas: {e}")
+                else:
+                    logging.warning("Video stream frame retrieval failed")
+                    self.video_running = False
+                    return
+            else:
+                logging.warning("Video stream connection lost")
+                self.video_running = False
+                return
+        except Exception as e:
+            logging.warning(f"Video frame processing error: {e}")
+            self.video_running = False
+            return
+        if self.video_running:
+            self.next_video_loop_event = self.root_window.after(30, self.update_video_stream)
+
     #----------------------------------------------------------------------------------------------------
     # Callback to handle Loco Emergency Stop
     #----------------------------------------------------------------------------------------------------
@@ -429,8 +475,8 @@ class complex_throttle(Tk.LabelFrame):
         self.traction_responsiveness = traction_responsiveness
         self.brake_responsiveness = brake_responsiveness
         self.axle_offsets = axle_offsets_ft
-        self.fwd_stream_url = fwd_stream_url.strip() if fwd_stream_url else ""
-        self.rev_stream_url = rev_stream_url.strip() if rev_stream_url else ""
+        self.fwd_stream_url = fwd_stream_url.strip()
+        self.rev_stream_url = rev_stream_url.strip()
         # --- Recalibrate the physical speed dial indicator max bounds ---
         self.speed_dial.recalibrate(new_max_val=self.loco_max_speed)
         # Handle showing or hiding the layout video widget box entirely
@@ -438,6 +484,7 @@ class complex_throttle(Tk.LabelFrame):
             self.video_frame.pack(side=Tk.TOP, pady=5, before=self.control_desk)
         else:
             self.video_frame.pack_forget()
+        self.update_video_stream_source()
         # Safely pull and update tracking mass data strings
         try:
             entry_val = self.load_mass_entry.get()
@@ -466,7 +513,7 @@ class complex_throttle(Tk.LabelFrame):
         self.audio_sample_index = 0
         self.hiss_playback_index = 0
         # 3. Spin up the new stream if conditions are met
-        if video_streaming_enabled and audio_enabled:
+        if audio_enabled:
             if self.axle_offsets == []:
                 self.axle_joint_indices = []
                 self.clack_sample = numpy.array([])
@@ -507,36 +554,6 @@ class complex_throttle(Tk.LabelFrame):
             self.btn_fwd.configure(state="normal")
             self.btn_rev.configure(state="normal")
             self.btn_estop.configure(state="normal")
-            
-    #----------------------------------------------------------------------------------------------------
-    # This is the video processing loop
-    #----------------------------------------------------------------------------------------------------
-
-    def update_video_stream(self):
-        if not self.video_running or self.video_capture is None:
-            return
-        try:
-            if self.video_capture.grab():
-                ret, frame = self.video_capture.retrieve()
-                if ret and frame is not None:
-                    frame = cv2.resize(frame, (480, 270))
-                    cv2image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    img = Image.fromarray(cv2image)
-                    imgtk = ImageTk.PhotoImage(image=img)
-                    self.video_screen.imgtk = imgtk
-                    self.video_screen.configure(image=imgtk)
-            else:
-                # Stream connection lost
-                logging.warning("Video stream connection lost")
-                self.video_running = False
-                return
-        except Exception as e:
-            logging.warning(f"Video frame processing error: {e}")
-            self.video_running = False
-            return
-        
-        if self.video_running:
-            self.next_video_loop_event = self.root_window.after(30, self.update_video_stream)
 
     #----------------------------------------------------------------------------------------------------
     # This is the main control loop handling the locomotive performance

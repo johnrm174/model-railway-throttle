@@ -1,4 +1,5 @@
 import tkinter as Tk
+from tkinter import ttk
 
 #---------------------------------------------------------------------------------------------------------
 # Generic Class for creating tooltips
@@ -38,16 +39,13 @@ class CreateToolTip():
     def showtip(self, event=None):
         tool_tip_x1 = self.widget.winfo_rootx()
         tool_tip_y1 = self.widget.winfo_rooty()
-        
         self.tool_tip_window = Tk.Toplevel(self.widget)
         self.tool_tip_window.attributes('-topmost', True)
         self.tool_tip_window.wm_geometry("+%d+%d" % (tool_tip_x1 + 25, tool_tip_y1 + 25))
         self.tool_tip_window.wm_overrideredirect(True)
-        
         tool_tip_label = Tk.Label(self.tool_tip_window, text=self.text, justify='left',
                                   background="#ffffff", relief='solid', borderwidth=1, wraplength=self.wraplength)
         tool_tip_label.pack(ipadx=1)
-        
         self.widget.update_idletasks()
         tool_tip_window_width = self.tool_tip_window.winfo_width()
         tool_tip_window_height = self.tool_tip_window.winfo_height()
@@ -72,7 +70,17 @@ class CreateToolTip():
             tool_tip_window.destroy()
 
 #---------------------------------------------------------------------------------------------------------
-# Generic Class fora check box
+# Generic Class for a dropdown box
+#-------------------------------------------------------------------------------------------------------
+
+def dropdown_box(parent, values, tooltip:str, **kwargs):
+    # Create a Combobox themed widget
+    combo = ttk.Combobox(parent, values=values, state="readonly")
+    CreateToolTip(combo, tooltip)
+    return combo
+
+#---------------------------------------------------------------------------------------------------------
+# Generic Class for a check box
 #---------------------------------------------------------------------------------------------------------
 
 class check_box(Tk.Checkbutton):
@@ -144,11 +152,9 @@ class integer_entry_box(Tk.Entry):
                 self.configure(fg='red')
                 self.tooltip_manager.text = f"Out of range! Value must be ≤ {self.max_val}."
                 return
-                
             self.configure(fg='black')
             self.value = parsed_val
             self.tooltip_manager.text = self.base_tooltip
-            
         if event and event.keysym == 'Return': 
             self.parent_frame.focus()
         if self.callback is not None: 
@@ -179,14 +185,11 @@ class float_entry_box(Tk.Entry):
         self.min_val = min_val
         self.max_val = max_val
         self.base_tooltip = tooltip if tooltip else "Enter a decimal value."
-        
         self.entry = Tk.StringVar(parent_frame, str(self.value))
         self.parent_frame = parent_frame
         self.callback = callback
         super().__init__(self.parent_frame, width=width, textvariable=self.entry, justify='center')
-        
         self.tooltip_manager = CreateToolTip(self, self.base_tooltip)
-        
         self.bind('<Return>', self.entry_box_updated)
         self.bind('<Escape>', self.entry_box_cancel)
         self.bind('<FocusOut>', self.entry_box_updated)
@@ -199,7 +202,6 @@ class float_entry_box(Tk.Entry):
                 self.entry.set("0.0")
             else:
                 parsed_val = float(entered_value)
-                
             # Range validation checks
             if self.min_val is not None and parsed_val < self.min_val:
                 self.configure(fg='red')
@@ -209,7 +211,6 @@ class float_entry_box(Tk.Entry):
                 self.configure(fg='red')
                 self.tooltip_manager.text = f"Out of range! Value must be ≤ {self.max_val}."
                 return
-                
             self.value = parsed_val
             self.configure(fg='black')
             self.tooltip_manager.text = self.base_tooltip
@@ -217,7 +218,6 @@ class float_entry_box(Tk.Entry):
             self.configure(fg='red')
             self.tooltip_manager.text = "Error: Input must be a valid float decimal."
             return
-            
         if event and event.keysym == 'Return': 
             self.parent_frame.focus()
         if self.callback is not None: 
@@ -247,30 +247,24 @@ class string_entry_box(Tk.Entry):
         self.value = ""
         self.max_length = max_length
         self.base_tooltip = tooltip if tooltip else "Enter text."
-        
         self.entry = Tk.StringVar(parent_frame, self.value)
         self.parent_frame = parent_frame
         self.callback = callback
         super().__init__(self.parent_frame, width=width, textvariable=self.entry, justify='left')
-        
         self.tooltip_manager = CreateToolTip(self, self.base_tooltip)
-        
         self.bind('<Return>', self.entry_box_updated)
         self.bind('<Escape>', self.entry_box_cancel)
         self.bind('<FocusOut>', self.entry_box_updated)
         
     def entry_box_updated(self, event=None):
         entered_value = self.entry.get()
-        
         if self.max_length is not None and len(entered_value) > self.max_length:
             self.configure(fg='red')
             self.tooltip_manager.text = f"Too long! Maximum length allowed is {self.max_length} characters."
             return
-            
         self.value = entered_value
         self.configure(fg='black')
         self.tooltip_manager.text = self.base_tooltip
-        
         if event and event.keysym == 'Return': 
             self.parent_frame.focus()
         if self.callback is not None: 
@@ -300,27 +294,22 @@ class axle_entry_box(Tk.Entry):
         self.value = []
         self.max_length = max_length
         self.base_tooltip = tooltip if tooltip else "Enter comma-separated numbers for axle offsets."
-        
         self.entry = Tk.StringVar(parent_frame, "")
         self.parent_frame = parent_frame
         self.callback = callback
         super().__init__(self.parent_frame, width=width, textvariable=self.entry, justify='left')
-        
         self.tooltip_manager = CreateToolTip(self, self.base_tooltip)
-        
         self.bind('<Return>', self.entry_box_updated)
         self.bind('<Escape>', self.entry_box_cancel)
         self.bind('<FocusOut>', self.entry_box_updated)
         
     def entry_box_updated(self, event=None):
         entered_value = self.entry.get().strip()
-        
         # 1. Enforce max character length safety first
         if self.max_length is not None and len(entered_value) > self.max_length:
             self.configure(fg='red')
             self.tooltip_manager.text = f"Too long! Maximum length allowed is {self.max_length} characters."
             return
-
         # 2. Check for empty string (Perfectly valid -> translates to an empty list)
         if not entered_value:
             self.value = []
@@ -337,7 +326,6 @@ class axle_entry_box(Tk.Entry):
                 self.configure(fg='red')
                 self.tooltip_manager.text = "Error: Input must be numbers separated by commas only (e.g. 0.0, 7.5)."
                 return 
-            
         if event and event.keysym == 'Return': 
             self.parent_frame.focus()
         if self.callback is not None: 
@@ -363,7 +351,6 @@ class axle_entry_box(Tk.Entry):
             # Fallback handling for blank configurations
             self.value = []
             self.entry.set("")
-            
         self.configure(fg='black')
         self.tooltip_manager.text = self.base_tooltip
 
@@ -377,16 +364,9 @@ class RadioGroupWrapper:
         self.callback = callback
         self.var = Tk.IntVar(value=20)  # Defaulting to INFO (20)
         self.buttons = []
-        
         # Grid or pack the options neatly inside this container frame
         for text, value in options:
-            rb = Tk.Radiobutton(
-                parent_frame, 
-                text=text, 
-                variable=self.var, 
-                value=value, 
-                command=self.entry_box_updated
-            )
+            rb = Tk.Radiobutton(parent_frame, text=text, variable=self.var, value=value, command=self.entry_box_updated)
             rb.pack(side=Tk.LEFT, padx=10)
             self.buttons.append(rb)
 

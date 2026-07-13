@@ -51,6 +51,7 @@ class remote_dcc_throttle(Tk.LabelFrame):
         self.network_identifier = ""
         self.throttle_node_identifier = ""
         self.command_station_node_identifier = ""
+        self.enhanced_debugging = False
         # Callback for session updates
         self.session_callback = None
         self.session_requested = False
@@ -160,7 +161,6 @@ class remote_dcc_throttle(Tk.LabelFrame):
             # We always assume the session has been released
             self.session_id = 0
             self.session_response_received(self.session_id)
-            self.session_callback(self.session_id)
 
     #----------------------------------------------------------------------------------------------------
     # Callbacks to handle power state requests/responses for a remote node
