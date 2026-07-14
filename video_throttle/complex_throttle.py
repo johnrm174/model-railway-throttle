@@ -1,18 +1,12 @@
-video_streaming_enabled = False
-try:
-    import cv2  # Open Source Computer Vision Library (for cab-view video streams)
-    import sounddevice  # Cross-platform audio stream management
-    from PIL import Image, ImageTk  # Handles converting OpenCV frames into Tkinter images
-    video_streaming_enabled = True
-except ImportError:
-    # If dependencies are missing, fallback to a disabled video/audio state gracefully
-    pass
-
 import tkinter as Tk
 import logging
 import threading
 import math
 import numpy
+
+import cv2  # Open Source Computer Vision Library (for cab-view video streams)
+import sounddevice  # Cross-platform audio stream management
+from PIL import Image, ImageTk  # Handles converting OpenCV frames into Tkinter images
 
 from .widgets import integer_entry_box
 from . import mqtt_interface
@@ -252,7 +246,7 @@ class complex_throttle(Tk.LabelFrame):
         self.dcc_direction = None
         self.update_direction_button_visuals()
         self.video_screen.delete("all")  # Clear canvas instead of configure
-        self.video_screen.create_text(240, 135, text="Select Direction to Start Video", fill="white", font=("Arial", 12))
+        self.show_video_message("Select cab direction (FWD/REV) to start video")
         # Reset the dials to their default states
         self.speed_dial.update_dial(0)
         self.power_dial.update_dial(0)
@@ -345,9 +339,14 @@ class complex_throttle(Tk.LabelFrame):
             self.video_btn_fwd.configure(bg="#444444", relief=Tk.RAISED)
             self.video_btn_rev.configure(bg="#444444", relief=Tk.RAISED)
 
-    # --- Asynchronous Video Connection Methods ---
-    # These functions shift the high latency RTSP/HTTP network lookup out of the UI pipeline.
+    #----------------------------------------------------------------------------------------------------
+    # Video connection/disconnection and update functions.
+    #----------------------------------------------------------------------------------------------------
     
+    def show_video_message(self, text, color="white"):
+        self.video_screen.delete("all")
+        self.video_screen.create_text(240, 135, text=text, fill=color, font=("Arial", 12))
+        
     def async_connect_video(self, url):
         try:
             cap = cv2.VideoCapture(url)
@@ -355,10 +354,10 @@ class complex_throttle(Tk.LabelFrame):
             if cap.isOpened():
                 self.root_window.after(0, lambda: self.on_video_connected(cap))
             else:
-                self.root_window.after(0, lambda: self.video_screen.configure(text="Error: Could not open Video Stream"))
+                self.root_window.after(0, lambda: self.show_video_message("Unable to open video stream", color="red"))
         except Exception as e:
-            self.root_window.after(0, lambda: self.video_screen.configure(text=f"Video Connection Error: {e}"))
-    
+            self.root_window.after(0, lambda: self.show_video_message(f"Video connection error: {e}", color="red"))
+                                                                                
     def on_video_connected(self, capture_object):
         if not self.video_running:
             # Stream was cancelled before connection completed
@@ -373,21 +372,16 @@ class complex_throttle(Tk.LabelFrame):
             self.cleanup_video()
         self.video_screen.delete("all")  # Clear canvas
         if self.video_direction is None:
-            self.video_screen.create_text(240, 135, text="Select Direction to Start Video", 
-                                          fill="white", font=("Arial", 12))
+            self.show_video_message("Select cab direction (FWD/REV) to start video")
             return
         target_url = self.fwd_stream_url if self.video_direction is True else self.rev_stream_url
         direction_name = "Forward" if self.video_direction is True else "Reverse"
         if not target_url:
-            self.video_screen.create_text(240, 135, 
-                                          text=f"No video stream URL specified for {direction_name}", 
-                                          fill="white", font=("Arial", 12))
+            self.show_video_message(f"No {direction_name.lower()} video stream URL configured", color="orange")
             return
-        if video_streaming_enabled:
-            self.video_screen.create_text(240, 135, text="Connecting to Cab View...", 
-                                          fill="orange", font=("Arial", 12))
-            self.video_running = True
-            threading.Thread(target=self.async_connect_video, args=(target_url,), daemon=True).start()
+        self.show_video_message("Connecting to cab view...", color="orange")
+        self.video_running = True
+        threading.Thread(target=self.async_connect_video, args=(target_url,), daemon=True).start()
     
     def cleanup_video(self):
         # Clean up video stream capture threads
