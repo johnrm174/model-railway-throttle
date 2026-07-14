@@ -273,6 +273,8 @@ class CameraConfigWindow(Tk.Toplevel):
         self.entries["frame_buffers"].set(self.yaml.frame_buffers)
         self.entries["vertical_flip"].set(self.yaml.vertical_flip)
         self.entries["horizontal_mirror"].set(self.yaml.horizontal_mirror)
+        self.entries["device_name"].set(self.yaml.device_name)
+        self.entries["friendly_name"].set(self.yaml.friendly_name)
         # If filename exists, extract the base name string; otherwise, default to "None"
         filename_text = os.path.basename(self.yaml.filename) if self.yaml.filename else "None"
         self.filename_var.set(filename_text)
@@ -295,6 +297,8 @@ class CameraConfigWindow(Tk.Toplevel):
         except Exception:
             self.yaml.frame_buffers = 1
         self.yaml.vertical_flip = bool(self.entries["vertical_flip"].get())
+        self.yaml.device_name = self.entries["device_name"].get()
+        self.yaml.friendly_name = self.entries["friendly_name"].get()
         self.yaml.horizontal_mirror = bool(self.entries["horizontal_mirror"].get())
 
     # File Menu Operations
