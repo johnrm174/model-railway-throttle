@@ -1,0 +1,38 @@
+{
+    "locomotive": {
+        "loco_name": "25052",
+        "loco_mass_tonnes": 120,
+        "loco_horsepower": 2580,
+        "loco_max_speed_mph": 95,
+        "max_tractive_effort_lbf": 62000,
+        "traction_responsiveness": 0.05,
+        "brake_responsiveness": 0.08,
+        "dcc_address": 10,
+        "dcc_speed_scaling": 1.0,
+        "axle_offsets_ft": [
+            0.0,
+            7.0,
+            14.0,
+            40.0,
+            47.0,
+            54.0
+        ],
+        "fwd_stream_url": "http://10.42.0.215:8080",
+        "rev_stream_url": ""
+    },
+    "general_settings": {
+        "sound_enabled": true,
+        "log_level": 30,
+        "connect_immediately": true
+    },
+    "mqtt_settings": {
+        "broker_host": "localhost",
+        "broker_port": 1883,
+        "broker_username": "",
+        "broker_password": "",
+        "network_identifier": "DEMO",
+        "throttle_node_identifier": "TH01",
+        "enhanced_debugging": true,
+        "command_station_node_identifier": "CS01"
+    }
+}

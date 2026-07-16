@@ -11,6 +11,9 @@ from tkinter import filedialog, messagebox
 import json
 import sys
 import queue
+import os
+from importlib import resources
+
 
 class ThrottleApplication(Tk.Tk):
 
@@ -20,13 +23,18 @@ class ThrottleApplication(Tk.Tk):
 
     def __init__(self):
         super().__init__()
-        self.title("Cab Control Throttle System")
+        self.current_file_path = None
+        self.update_window_title()
         # Create the main menubar
         menubar = Tk.Menu(self)
         # File Menu
         file_menu = Tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="Load Locomotive...", command=self.load_throttle_file)
-        file_menu.add_command(label="Save Locomotive...", command=self.save_throttle_file)
+        file_menu.add_command(label="New", command=self.new_throttle_file)
+        file_menu.add_command(label="Load...", command=self.load_throttle_file)
+        file_menu.add_command(label="Save", command=self.save_throttle_file)
+        file_menu.add_command(label="Save As...", command=self.save_throttle_file_as)
+        file_menu.add_separator()
+        file_menu.add_command(label="Examples...", command=self.load_example_file)
         file_menu.add_separator()
         file_menu.add_command(label="Quit", command=self.on_exit)
         menubar.add_cascade(label="File", menu=file_menu)
@@ -70,16 +78,8 @@ class ThrottleApplication(Tk.Tk):
         # Create the Throttle UI element & Initialise inside the scrollable workspace
         self.dcc_throttle = dcc_control.remote_dcc_throttle(root_window=self, parent_frame=self.workspace)
         self.active_throttle = complex_throttle.complex_throttle(root_window=self, parent_frame=self.workspace)
-        # Set the UI with the default params
-        default_config = self.get_default_configuration()
-        self.dcc_throttle.set_session_callback(self.loco_session_updated)
-        self.dcc_throttle.update_parameters(**default_config["mqtt_settings"])
-        self.dcc_throttle.update_loco_dcc_address(default_config["locomotive"]["dcc_address"])
-        self.active_throttle.update_parameters(**default_config["locomotive"])
-        self.active_throttle.enable_audio(default_config["general_settings"]["sound_enabled"])
-        logging.getLogger().setLevel(default_config["general_settings"]["log_level"])
         # Current configuration is the default configuration at application start
-        self.current_configuration = self.get_default_configuration()
+        self.new_throttle_file()
         # Dynamic Window Geometry Initialization
         self.adjust_window_geometry()
 
@@ -89,7 +89,19 @@ class ThrottleApplication(Tk.Tk):
 
     def loco_session_updated(self, session_id:int):
         self.active_throttle.activate_loco_session(session_id)
-        
+
+    #-----------------------------------------------------------------------------------------
+    # This handles the update of th window title following file load
+    #-----------------------------------------------------------------------------------------
+
+    def update_window_title(self):
+        base = "Cab Control"
+        if self.current_file_path:
+            filename = self.current_file_path.split("/")[-1].split("\\")[-1]
+            self.title(f"{base} - {filename}")
+        else:
+            self.title(f"{base} - Untitled")
+
     #-----------------------------------------------------------------------------------------
     # Resize window on initialisation and file load - If the window will fit on the screen
     # fully then it aill be sized fullsize - if the window height is greater than the screen
@@ -122,30 +134,30 @@ class ThrottleApplication(Tk.Tk):
     def get_default_configuration(self):
         return {
             "locomotive": {
-                "loco_name": "Class 47",
-                "loco_mass_tonnes": 120,
-                "loco_horsepower": 2580,
-                "loco_max_speed_mph": 95,
-                "max_tractive_effort_lbf": 62000,
-                "traction_responsiveness": 0.05,
-                "brake_responsiveness": 0.08,
-                "dcc_address": 47,
+                "loco_name": "Generic Loco",
+                "loco_mass_tonnes": 10,
+                "loco_horsepower": 5000,
+                "loco_max_speed_mph": 100,
+                "max_tractive_effort_lbf": 30000,
+                "traction_responsiveness": 0.25,
+                "brake_responsiveness": 0.25,
+                "dcc_address": 3,
                 "dcc_speed_scaling": 1.0,
-                "axle_offsets_ft": [0.0, 7.0, 14.0, 40.0, 47.0, 54.0],
-                "fwd_stream_url": "localhost",
+                "axle_offsets_ft": [],
+                "fwd_stream_url": "",
                 "rev_stream_url": ""
             },
             "general_settings": {
                 "sound_enabled": True,
                 "log_level": 20,  # 20 is the standard standard-library logging.INFO level
-                "connect_immediately": False
+                "connect_immediately": True
             },
             "mqtt_settings": {
                 "broker_host": "localhost",
                 "broker_port": 1883,
                 "broker_username": "",
                 "broker_password": "",
-                "network_identifier": "LAYOUT",
+                "network_identifier": "DEMO",
                 "throttle_node_identifier": "TH01",
                 "enhanced_debugging": True,
                 "command_station_node_identifier": "CS01"
@@ -157,48 +169,84 @@ class ThrottleApplication(Tk.Tk):
     # any 'blanks' are filled in with the values from the default configuration (above)
     #-----------------------------------------------------------------------------------------
 
-    def load_throttle_file(self):
+    def new_throttle_file(self):
+        default_config = self.get_default_configuration()
+        self.dcc_throttle.set_session_callback(self.loco_session_updated)
+        self.dcc_throttle.update_parameters(**default_config["mqtt_settings"])
+        self.dcc_throttle.update_loco_dcc_address(default_config["locomotive"]["dcc_address"])
+        self.active_throttle.update_parameters(**default_config["locomotive"])
+        self.active_throttle.enable_audio(default_config["general_settings"]["sound_enabled"])
+        logging.getLogger().setLevel(default_config["general_settings"]["log_level"])
+        self.current_configuration = default_config
+        self.current_file_path = None
+        self.update_window_title()
+
+    def load_example_file(self):
+        try:
+            examples_ref = resources.files(__package__).joinpath("examples")
+            with resources.as_file(examples_ref) as examples_path:
+                self.load_throttle_file(folder=str(examples_path))
+        except Exception as e:
+            messagebox.showerror("Examples", f"Failed to open examples:\n{e}")
+
+    def load_throttle_file(self, folder=None):
+        initial_dir = folder if folder is not None else os.getcwd()
         file_path = filedialog.askopenfilename(
-            parent=self, defaultextension=".json",
-            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")] )
+            parent=self,
+            initialdir=initial_dir,
+            defaultextension=".json",
+            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")])
         if file_path:
             try:
                 with open(file_path, 'r') as f:
                     loaded_config = json.load(f)
-                # Fetch full structural dictionary with defaults
                 final_config = self.get_default_configuration()
-                # Direct block-by-block overwrite update
                 for block in ["locomotive", "general_settings", "mqtt_settings"]:
                     if block in loaded_config and isinstance(loaded_config[block], dict):
                         final_config[block].update(loaded_config[block])
             except Exception as e:
                 messagebox.showerror("Load Error", f"Failed to parse locomotive profile:\n{str(e)}")
             else:
-                # Update configurations and pass locomotive properties downstream
                 self.current_configuration = final_config
                 self.active_throttle.update_parameters(**final_config["locomotive"])
                 self.active_throttle.enable_audio(final_config["general_settings"]["sound_enabled"])
                 self.dcc_throttle.update_loco_dcc_address(final_config["locomotive"]["dcc_address"])
                 self.dcc_throttle.update_parameters(**final_config["mqtt_settings"])
-                # Connect to the broker on file load if requested
-                if final_config["general_settings"]["connect_immediately"]: self.dcc_throttle.mqtt_broker_connect()
-                # Update the logging level
+                if final_config["general_settings"]["connect_immediately"]:
+                    self.dcc_throttle.mqtt_broker_connect()
                 logging.getLogger().setLevel(final_config["general_settings"]["log_level"])
-                # Expand/shrink the window as appropriate (to pack/forget the video stream)
+                self.current_file_path = file_path
+                self.update_window_title()
                 self.adjust_window_geometry()
 
     def save_throttle_file(self):
+        # Normal Save: if no filename yet, behave like Save As
+        if not self.current_file_path:
+            self.save_throttle_file_as()
+            return
+        try:
+            with open(self.current_file_path, 'w') as f:
+                json.dump(self.current_configuration, f, indent=4)
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Failed to write file:\n{str(e)}")
+
+    def save_throttle_file_as(self):
+        # Always prompt
         file_path = filedialog.asksaveasfilename(
+            parent=self,
             defaultextension=".json",
-            filetypes=[("JSON Files", "*.json")])
-        if file_path:
-            try:
-                with open(file_path, 'w') as f:
-                    json.dump(self.current_configuration, f, indent=4)
-                messagebox.showinfo("Success", "Locomotive configuration saved successfully.")
-            except Exception as e:
-                messagebox.showerror("Save Error", f"Failed to write file:\n{str(e)}")
-                
+            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
+        )
+        if not file_path:
+            return
+        try:
+            with open(file_path, 'w') as f:
+                json.dump(self.current_configuration, f, indent=4)
+            self.current_file_path = file_path
+            self.update_window_title()
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Failed to write file:\n{str(e)}")
+    
     #-----------------------------------------------------------------------------------------
     # Class methods for opening the various settings windows and then applying the changes
     #-----------------------------------------------------------------------------------------

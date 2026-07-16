@@ -237,7 +237,10 @@ class remote_dcc_throttle(Tk.LabelFrame):
             
             self.btn_session.configure(text="Get Session", bg=self.default_bg, fg=self.default_fg,
                                        activebackground=self.default_abg, activeforeground=self.default_afg)
-            messagebox.showerror("Session Error", f"Could not acquire session for DCC Address {self.dcc_address}")
+            # Only pop up an error message if we have requested a session
+            if self.session_requested:
+                messagebox.showerror("Session Error", f"Could not acquire session for DCC Address {self.dcc_address}")
+        self.session_requested = False
         self.session_callback(self.session_id)
 
     #----------------------------------------------------------------------------------------------------

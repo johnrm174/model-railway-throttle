@@ -1,0 +1,38 @@
+{
+    "locomotive": {
+        "loco_name": "Class 37",
+        "dcc_address": 3,
+        "dcc_speed_scaling": 1.0,
+        "loco_horsepower": 1750,
+        "loco_mass_tonnes": 100,
+        "loco_max_speed_mph": 90,
+        "max_tractive_effort_lbf": 46000,
+        "traction_responsiveness": 0.08,
+        "brake_responsiveness": 0.08,
+        "axle_offsets_ft": [
+            17.5,
+            24.5,
+            31.5,
+            57.5,
+            64.5,
+            71.5
+        ],
+        "fwd_stream_url": "",
+        "rev_stream_url": ""
+    },
+    "general_settings": {
+        "sound_enabled": true,
+        "log_level": 30,
+        "connect_immediately": true
+    },
+    "mqtt_settings": {
+        "broker_host": "localhost",
+        "broker_port": 1883,
+        "broker_username": "",
+        "broker_password": "",
+        "network_identifier": "DEMO",
+        "throttle_node_identifier": "TH01",
+        "enhanced_debugging": true,
+        "command_station_node_identifier": "CS01"
+    }
+}
