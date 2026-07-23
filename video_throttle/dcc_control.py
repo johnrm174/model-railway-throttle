@@ -240,7 +240,8 @@ class remote_dcc_throttle(Tk.LabelFrame):
             if self.session_requested:
                 messagebox.showerror("Session Error", f"Could not acquire session for DCC Address {self.dcc_address}")
         self.session_requested = False
-        self.session_callback(self.session_id)
+        if self.session_callback:
+            self.session_callback(self.session_id)
 
     #----------------------------------------------------------------------------------------------------
     # Callback for handling loco session and DCC power response messages received from the remote node

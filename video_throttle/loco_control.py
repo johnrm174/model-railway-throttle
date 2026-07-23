@@ -801,11 +801,12 @@ class complex_throttle(Tk.LabelFrame):
         # Layer 3: Dynamic wheel joint click mixing loop
         clack_audio = self.stereo_buffer[:frames, 1]
         clack_audio[:] = 0.0
-        if self.pending_clacks:
-            with self.clack_lock:
+        # Drain pending clacks atomically (check + move under same lock)
+        with self.clack_lock:
+            if self.pending_clacks:
                 self.active_clacks.extend(self.pending_clacks)
                 self.pending_clacks.clear()
-        ducking_factor = 1.0
+        ducking_factor = 1.0        
         for clack in self.active_clacks:
             idx, vol = clack[0], clack[1]
             remaining_samples = len(self.clack_sample) - idx

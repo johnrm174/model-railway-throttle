@@ -68,6 +68,7 @@ class LocoConfigWindow(Tk.Toplevel):
         self.preview_selection_label.pack(pady=(0, 5))
         self.preview_canvas = Tk.Canvas(preview_frame, width=320, height=240, bg="black")
         self.preview_canvas.pack()
+        self.preview_image_id = self.preview_canvas.create_image(0, 0, anchor=Tk.NW, image=None)
         self.status_label = Tk.Label(preview_frame, text="Select a camera to preview", fg="gray")
         self.status_label.pack(pady=(5, 0))
         # Field configurations (Using custom types for streams)
@@ -216,8 +217,10 @@ class LocoConfigWindow(Tk.Toplevel):
     def show_no_feed_preview(self, message="No feed selected"):
         self.stop_preview_stream()
         try:
-            self.preview_canvas.delete("all")
-            self.preview_canvas.create_text(160, 120, text=message, fill="white", font=("Arial", 12))
+            self.preview_canvas.itemconfig(self.preview_image_id, image="")
+            self.preview_canvas.delete("preview_text")
+            self.preview_canvas.create_text(160, 120, text=message, fill="white", font=("Arial", 12), tags="preview_text")
+            self.preview_canvas.image = None
         except Exception:
             pass
         if hasattr(self, "status_label") and self.status_label.winfo_exists():
@@ -305,12 +308,15 @@ class LocoConfigWindow(Tk.Toplevel):
             self.status_label.config(text=text, fg=color)
             
     def draw_frame(self, img_tk, generation, token):
-        if token != self.preview_token: return
-        if generation != self.preview_generation: return
+        if token != self.preview_token:
+            return
+        if generation != self.preview_generation:
+            return
         if self.preview_thread_running:
-            self.preview_canvas.create_image(0, 0, anchor=Tk.NW, image=img_tk)
+            self.preview_canvas.delete("preview_text")
+            self.preview_canvas.itemconfig(self.preview_image_id, image=img_tk)
             self.preview_canvas.image = img_tk
-    
+
     # -------------------------------------------------------------------------
     # Data Validation and Pipeline Handling
     # -------------------------------------------------------------------------
@@ -357,8 +363,10 @@ class LocoConfigWindow(Tk.Toplevel):
         self.stop_preview_stream(wait=True)
         self.current_preview_url = ""
         self.status_label.config(text="Stream Released", fg="gray")
-        self.preview_canvas.delete("all")
-        self.preview_canvas.create_text(160, 120, text="Preview paused", fill="white", font=("Arial", 12))
+        self.preview_canvas.itemconfig(self.preview_image_id, image="")
+        self.preview_canvas.delete("preview_text")
+        self.preview_canvas.create_text(160, 120, text="Preview paused", fill="white", font=("Arial", 12), tags="preview_text")
+        self.preview_canvas.image = None
         # Save the updated config
         self.save_callback(updated_config)
         if close_window:
