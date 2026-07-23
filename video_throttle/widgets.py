@@ -75,7 +75,7 @@ class CreateToolTip():
 
 def dropdown_box(parent, values, tooltip:str, **kwargs):
     # Create a Combobox themed widget
-    combo = ttk.Combobox(parent, values=values, state="readonly")
+    combo = ttk.Combobox(parent, values=values, state="readonly", **kwargs)
     CreateToolTip(combo, tooltip)
     return combo
 
@@ -88,10 +88,23 @@ class check_box(Tk.Checkbutton):
         self.parent_frame = parent_frame
         self.callback = callback
         self.base_tooltip = tooltip
+        self.is_valid = True
+        self.validation_error = None
         # Internal boolean tracking engine matching your standard pattern
         self.selection = Tk.BooleanVar(self.parent_frame, False)
         super().__init__(self.parent_frame, text=label, anchor="w", width=width, variable=self.selection, command=self.entry_box_updated)
         self.tooltip_manager = CreateToolTip(self, self.base_tooltip)
+
+    def validate(self):
+        # Checkboxes are intrinsically valid; this method exists for unified caller pipelines.
+        self.is_valid = True
+        self.validation_error = None
+        self.configure(fg='black')
+        self.tooltip_manager.text = self.base_tooltip
+        return True
+
+    def get_validation_error(self):
+        return self.validation_error
 
     def entry_box_updated(self, event=None):
         # Note the Unified method name for validation loop passes
@@ -99,7 +112,7 @@ class check_box(Tk.Checkbutton):
         # Checkboxes don't have visual validation exceptions (like text blocks turning red),
         # but we need to maintain this method to ensure the programmatic validation loop in
         # The your parent window class (field.entry_box_updated()) doesn't break.
-        self.configure(fg='black') 
+        self.validate()
         if self.callback is not None: 
             self.callback()
 
@@ -108,8 +121,7 @@ class check_box(Tk.Checkbutton):
 
     def set(self, new_value: bool):
         self.selection.set(new_value)
-        self.configure(fg='black')
-        self.tooltip_manager.text = self.base_tooltip
+        self.validate()
 
 #---------------------------------------------------------------------------------------------------------
 # Generic Class for an integer entry box
@@ -120,42 +132,70 @@ class integer_entry_box(Tk.Entry):
         self.value = 0
         self.min_val = min_val
         self.max_val = max_val
-        self.base_tooltip = tooltip if tooltip else f"Enter an integer value."
+        self.base_tooltip = tooltip if tooltip else "Enter an integer value."
         self.entry = Tk.StringVar(parent_frame, str(self.value))
         self.parent_frame = parent_frame
         self.callback = callback
+        self.is_valid = True
+        self.validation_error = None
         super().__init__(self.parent_frame, width=width, textvariable=self.entry, justify='center')
         self.tooltip_manager = CreateToolTip(self, self.base_tooltip)
+        # Live validation on entry + explicit commit validation hooks.
+        self.bind('<KeyRelease>', self.entry_box_live_validate)
         self.bind('<Return>', self.entry_box_updated)
         self.bind('<Escape>', self.entry_box_cancel)
         self.bind('<FocusOut>', self.entry_box_updated)
         
-    def entry_box_updated(self, event=None):
+    def validate(self):
         entered_value = self.entry.get()        
         if entered_value == "":
             self.entry.set("0")
             self.value = 0
+            self.is_valid = True
+            self.validation_error = None
             self.configure(fg='black')
             self.tooltip_manager.text = self.base_tooltip
+            return True
         elif not entered_value.lstrip('-+').isdigit():
+            self.is_valid = False
+            self.validation_error = "Input must be a valid integer."
             self.configure(fg='red')
-            self.tooltip_manager.text = "Error: Input must be a valid integer."
-            return 
+            self.tooltip_manager.text = f"Error: {self.validation_error}"
+            return False
         else:
             parsed_val = int(entered_value)
             # Range validation checks
             if self.min_val is not None and parsed_val < self.min_val:
+                self.is_valid = False
+                self.validation_error = f"Value must be ≥ {self.min_val}."
                 self.configure(fg='red')
-                self.tooltip_manager.text = f"Out of range! Value must be ≥ {self.min_val}."
-                return
+                self.tooltip_manager.text = f"Out of range! {self.validation_error}"
+                return False
             if self.max_val is not None and parsed_val > self.max_val:
+                self.is_valid = False
+                self.validation_error = f"Value must be ≤ {self.max_val}."
                 self.configure(fg='red')
-                self.tooltip_manager.text = f"Out of range! Value must be ≤ {self.max_val}."
-                return
+                self.tooltip_manager.text = f"Out of range! {self.validation_error}"
+                return False
             self.configure(fg='black')
             self.value = parsed_val
+            self.is_valid = True
+            self.validation_error = None
             self.tooltip_manager.text = self.base_tooltip
-        if event and event.keysym == 'Return': 
+            return True
+
+    def get_validation_error(self):
+        return self.validation_error
+
+    def entry_box_live_validate(self, event=None):
+        # Validate continuously while typing so errors are shown immediately.
+        self.validate()
+        if self.callback is not None:
+            self.callback()
+
+    def entry_box_updated(self, event=None):
+        self.validate()
+        if event and getattr(event, "keysym", None) == 'Return': 
             self.parent_frame.focus()
         if self.callback is not None: 
             self.callback()
@@ -163,6 +203,8 @@ class integer_entry_box(Tk.Entry):
     def entry_box_cancel(self, event):
         self.entry.set(str(self.value))
         self.configure(fg='black')
+        self.is_valid = True
+        self.validation_error = None
         self.tooltip_manager.text = self.base_tooltip
         self.parent_frame.focus()
         
@@ -173,6 +215,8 @@ class integer_entry_box(Tk.Entry):
         self.value = int(new_value)
         self.entry.set(str(self.value))
         self.configure(fg='black')
+        self.is_valid = True
+        self.validation_error = None
         self.tooltip_manager.text = self.base_tooltip
 
 #---------------------------------------------------------------------------------------------------------
@@ -188,13 +232,17 @@ class float_entry_box(Tk.Entry):
         self.entry = Tk.StringVar(parent_frame, str(self.value))
         self.parent_frame = parent_frame
         self.callback = callback
+        self.is_valid = True
+        self.validation_error = None
         super().__init__(self.parent_frame, width=width, textvariable=self.entry, justify='center')
         self.tooltip_manager = CreateToolTip(self, self.base_tooltip)
+        # Live validation on entry + explicit commit validation hooks.
+        self.bind('<KeyRelease>', self.entry_box_live_validate)
         self.bind('<Return>', self.entry_box_updated)
         self.bind('<Escape>', self.entry_box_cancel)
         self.bind('<FocusOut>', self.entry_box_updated)
         
-    def entry_box_updated(self, event=None):
+    def validate(self):
         entered_value = self.entry.get()        
         try:
             if entered_value == "":
@@ -204,21 +252,42 @@ class float_entry_box(Tk.Entry):
                 parsed_val = float(entered_value)
             # Range validation checks
             if self.min_val is not None and parsed_val < self.min_val:
+                self.is_valid = False
+                self.validation_error = f"Value must be ≥ {self.min_val}."
                 self.configure(fg='red')
-                self.tooltip_manager.text = f"Out of range! Value must be ≥ {self.min_val}."
-                return
+                self.tooltip_manager.text = f"Out of range! {self.validation_error}"
+                return False
             if self.max_val is not None and parsed_val > self.max_val:
+                self.is_valid = False
+                self.validation_error = f"Value must be ≤ {self.max_val}."
                 self.configure(fg='red')
-                self.tooltip_manager.text = f"Out of range! Value must be ≤ {self.max_val}."
-                return
+                self.tooltip_manager.text = f"Out of range! {self.validation_error}"
+                return False
             self.value = parsed_val
             self.configure(fg='black')
+            self.is_valid = True
+            self.validation_error = None
             self.tooltip_manager.text = self.base_tooltip
+            return True
         except ValueError:
+            self.is_valid = False
+            self.validation_error = "Input must be a valid float decimal."
             self.configure(fg='red')
-            self.tooltip_manager.text = "Error: Input must be a valid float decimal."
-            return
-        if event and event.keysym == 'Return': 
+            self.tooltip_manager.text = f"Error: {self.validation_error}"
+            return False
+
+    def get_validation_error(self):
+        return self.validation_error
+
+    def entry_box_live_validate(self, event=None):
+        # Validate continuously while typing so errors are shown immediately.
+        self.validate()
+        if self.callback is not None:
+            self.callback()
+
+    def entry_box_updated(self, event=None):
+        self.validate()
+        if event and getattr(event, "keysym", None) == 'Return': 
             self.parent_frame.focus()
         if self.callback is not None: 
             self.callback()
@@ -226,6 +295,8 @@ class float_entry_box(Tk.Entry):
     def entry_box_cancel(self, event):
         self.entry.set(str(self.value))
         self.configure(fg='black')
+        self.is_valid = True
+        self.validation_error = None
         self.tooltip_manager.text = self.base_tooltip
         self.parent_frame.focus()
         
@@ -236,6 +307,8 @@ class float_entry_box(Tk.Entry):
         self.value = float(new_value)
         self.entry.set(str(self.value))
         self.configure(fg='black')
+        self.is_valid = True
+        self.validation_error = None
         self.tooltip_manager.text = self.base_tooltip
 
 #---------------------------------------------------------------------------------------------------------
@@ -250,22 +323,43 @@ class string_entry_box(Tk.Entry):
         self.entry = Tk.StringVar(parent_frame, self.value)
         self.parent_frame = parent_frame
         self.callback = callback
+        self.is_valid = True
+        self.validation_error = None
         super().__init__(self.parent_frame, width=width, textvariable=self.entry, justify='left')
         self.tooltip_manager = CreateToolTip(self, self.base_tooltip)
+        # Live validation on entry + explicit commit validation hooks.
+        self.bind('<KeyRelease>', self.entry_box_live_validate)
         self.bind('<Return>', self.entry_box_updated)
         self.bind('<Escape>', self.entry_box_cancel)
         self.bind('<FocusOut>', self.entry_box_updated)
         
-    def entry_box_updated(self, event=None):
+    def validate(self):
         entered_value = self.entry.get()
         if self.max_length is not None and len(entered_value) > self.max_length:
+            self.is_valid = False
+            self.validation_error = f"Maximum length allowed is {self.max_length} characters."
             self.configure(fg='red')
-            self.tooltip_manager.text = f"Too long! Maximum length allowed is {self.max_length} characters."
-            return
+            self.tooltip_manager.text = f"Too long! {self.validation_error}"
+            return False
         self.value = entered_value
         self.configure(fg='black')
+        self.is_valid = True
+        self.validation_error = None
         self.tooltip_manager.text = self.base_tooltip
-        if event and event.keysym == 'Return': 
+        return True
+
+    def get_validation_error(self):
+        return self.validation_error
+
+    def entry_box_live_validate(self, event=None):
+        # Validate continuously while typing so errors are shown immediately.
+        self.validate()
+        if self.callback is not None:
+            self.callback()
+
+    def entry_box_updated(self, event=None):
+        self.validate()
+        if event and getattr(event, "keysym", None) == 'Return': 
             self.parent_frame.focus()
         if self.callback is not None: 
             self.callback()
@@ -273,6 +367,8 @@ class string_entry_box(Tk.Entry):
     def entry_box_cancel(self, event):
         self.entry.set(self.value)
         self.configure(fg='black')
+        self.is_valid = True
+        self.validation_error = None
         self.tooltip_manager.text = self.base_tooltip
         self.parent_frame.focus()
         
@@ -282,6 +378,9 @@ class string_entry_box(Tk.Entry):
     def set(self, new_value):
         self.value = str(new_value)
         self.entry.set(self.value)
+        self.configure(fg='black')
+        self.is_valid = True
+        self.validation_error = None
         self.tooltip_manager.text = self.base_tooltip
         
 #---------------------------------------------------------------------------------------------------------
@@ -297,36 +396,62 @@ class axle_entry_box(Tk.Entry):
         self.entry = Tk.StringVar(parent_frame, "")
         self.parent_frame = parent_frame
         self.callback = callback
+        self.is_valid = True
+        self.validation_error = None
         super().__init__(self.parent_frame, width=width, textvariable=self.entry, justify='left')
         self.tooltip_manager = CreateToolTip(self, self.base_tooltip)
+        # Live validation on entry + explicit commit validation hooks.
+        self.bind('<KeyRelease>', self.entry_box_live_validate)
         self.bind('<Return>', self.entry_box_updated)
         self.bind('<Escape>', self.entry_box_cancel)
         self.bind('<FocusOut>', self.entry_box_updated)
         
-    def entry_box_updated(self, event=None):
+    def validate(self):
         entered_value = self.entry.get().strip()
         # 1. Enforce max character length safety first
         if self.max_length is not None and len(entered_value) > self.max_length:
+            self.is_valid = False
+            self.validation_error = f"Maximum length allowed is {self.max_length} characters."
             self.configure(fg='red')
-            self.tooltip_manager.text = f"Too long! Maximum length allowed is {self.max_length} characters."
-            return
+            self.tooltip_manager.text = f"Too long! {self.validation_error}"
+            return False
         # 2. Check for empty string (Perfectly valid -> translates to an empty list)
         if not entered_value:
             self.value = []
             self.configure(fg='black')
+            self.is_valid = True
+            self.validation_error = None
             self.tooltip_manager.text = self.base_tooltip
+            return True
         else:
             # 3. Parse and validate comma-separated digits
             try:
                 parsed_list = [float(x.strip()) for x in entered_value.split(",") if x.strip() != ""]
                 self.value = parsed_list
                 self.configure(fg='black')
+                self.is_valid = True
+                self.validation_error = None
                 self.tooltip_manager.text = self.base_tooltip
+                return True
             except ValueError:
+                self.is_valid = False
+                self.validation_error = "Input must be numbers separated by commas only (e.g. 0.0, 7.5)."
                 self.configure(fg='red')
-                self.tooltip_manager.text = "Error: Input must be numbers separated by commas only (e.g. 0.0, 7.5)."
-                return 
-        if event and event.keysym == 'Return': 
+                self.tooltip_manager.text = f"Error: {self.validation_error}"
+                return False
+
+    def get_validation_error(self):
+        return self.validation_error
+
+    def entry_box_live_validate(self, event=None):
+        # Validate continuously while typing so errors are shown immediately.
+        self.validate()
+        if self.callback is not None:
+            self.callback()
+
+    def entry_box_updated(self, event=None):
+        self.validate()
+        if event and getattr(event, "keysym", None) == 'Return': 
             self.parent_frame.focus()
         if self.callback is not None: 
             self.callback()
@@ -335,6 +460,8 @@ class axle_entry_box(Tk.Entry):
         # Revert back to the last successfully committed state, stripped of brackets
         self.entry.set(", ".join(map(str, self.value)))
         self.configure(fg='black')
+        self.is_valid = True
+        self.validation_error = None
         self.tooltip_manager.text = self.base_tooltip
         self.parent_frame.focus()
         
@@ -352,6 +479,8 @@ class axle_entry_box(Tk.Entry):
             self.value = []
             self.entry.set("")
         self.configure(fg='black')
+        self.is_valid = True
+        self.validation_error = None
         self.tooltip_manager.text = self.base_tooltip
 
 #---------------------------------------------------------------------------------------------------------
@@ -359,19 +488,36 @@ class axle_entry_box(Tk.Entry):
 #---------------------------------------------------------------------------------------------------------
 
 class RadioGroupWrapper:
-    def __init__(self, parent_frame, options, callback=None):
+    def __init__(self, parent_frame, options, callback=None, default_value=20):
         self.parent_frame = parent_frame
         self.callback = callback
-        self.var = Tk.IntVar(value=20)  # Defaulting to INFO (20)
+        self.var = Tk.IntVar(value=default_value)  # Defaulting to INFO (20) unless explicitly overridden
         self.buttons = []
+        self.is_valid = True
+        self.validation_error = None
         # Grid or pack the options neatly inside this container frame
         for text, value in options:
             rb = Tk.Radiobutton(parent_frame, text=text, variable=self.var, value=value, command=self.entry_box_updated)
             rb.pack(side=Tk.LEFT, padx=10)
             self.buttons.append(rb)
 
+    def validate(self):
+        try:
+            int(self.var.get())
+            self.is_valid = True
+            self.validation_error = None
+            return True
+        except Exception:
+            self.is_valid = False
+            self.validation_error = "No valid selection."
+            return False
+
+    def get_validation_error(self):
+        return self.validation_error
+
     def entry_box_updated(self, event=None):
         self.parent_frame.focus()
+        self.validate()
         if self.callback is not None:
             self.callback()
 
@@ -380,6 +526,7 @@ class RadioGroupWrapper:
 
     def set(self, value):
         self.var.set(int(value))
+        self.validate()
 
 #----------------------------------------------------------------------------------------------------
 # Common config window control buttons

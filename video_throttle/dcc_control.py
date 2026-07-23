@@ -1,4 +1,3 @@
-from . import complex_throttle
 from . import mqtt_interface
 from . import common
 

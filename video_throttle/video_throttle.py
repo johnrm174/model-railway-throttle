@@ -1,18 +1,19 @@
 # Absolute package imports
-from . import complex_throttle
+from . import loco_control
 from . import dcc_control
-from .config_window import LocoConfigWindow, MqttConfigWindow, GeneralConfigWindow
-from .camera_utility import CameraConfigWindow
+from .windows_configuration import LocoConfigWindow
+from .windows_settings import MqttSettingsWindow, GeneralSettingsWindow
+from .windows_utilities import CameraConfigUtility
 
-import logging
 from logging.handlers import QueueHandler, QueueListener
-import tkinter as Tk
+from importlib import resources
 from tkinter import filedialog, messagebox
+import logging
+import tkinter as Tk
 import json
 import sys
 import queue
 import os
-from importlib import resources
 
 
 class ThrottleApplication(Tk.Tk):
@@ -38,8 +39,8 @@ class ThrottleApplication(Tk.Tk):
         file_menu.add_separator()
         file_menu.add_command(label="Quit", command=self.on_exit)
         menubar.add_cascade(label="File", menu=file_menu)
-        # Loco Configuration - Direct action button with no sub items
-        menubar.add_command(label="Loco-Configuration", command=self.open_loco_config)
+        # Locomotive Menu Entry (direct action, no submenu)
+        menubar.add_command(label="Locomotive", command=self.open_loco_config)
         # Settings Menu
         settings_menu = Tk.Menu(menubar, tearoff=0)
         settings_menu.add_command(label="MQTT...", command=self.open_mqtt_settings)
@@ -47,7 +48,7 @@ class ThrottleApplication(Tk.Tk):
         menubar.add_cascade(label="Settings", menu=settings_menu)
         # Tools Menu
         tools_menu = Tk.Menu(menubar, tearoff=0)
-        tools_menu.add_command(label="Camera Setup...", command=self.open_camera_tool)
+        tools_menu.add_command(label="Camera...", command=self.open_camera_tool)
         menubar.add_cascade(label="Tools", menu=tools_menu)
         # Help Menu
         help_menu = Tk.Menu(menubar, tearoff=0)
@@ -77,7 +78,7 @@ class ThrottleApplication(Tk.Tk):
         self.canvas.bind_all("<MouseWheel>", lambda e: self.canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
         # Create the Throttle UI element & Initialise inside the scrollable workspace
         self.dcc_throttle = dcc_control.remote_dcc_throttle(root_window=self, parent_frame=self.workspace)
-        self.active_throttle = complex_throttle.complex_throttle(root_window=self, parent_frame=self.workspace)
+        self.active_throttle = loco_control.complex_throttle(root_window=self, parent_frame=self.workspace)
         # Current configuration is the default configuration at application start
         self.new_throttle_file()
         # Dynamic Window Geometry Initialization
@@ -253,7 +254,7 @@ class ThrottleApplication(Tk.Tk):
 
     def open_loco_config(self):
         current_loco_config = self.current_configuration["locomotive"]
-        LocoConfigWindow(self, current_loco_config, save_callback=self.apply_loco_config_changes)
+        LocoConfigWindow.open_or_focus(self, current_loco_config, self.apply_loco_config_changes)
 
     def apply_loco_config_changes(self, new_loco_config):
         self.active_throttle.update_parameters(**new_loco_config)
@@ -262,7 +263,7 @@ class ThrottleApplication(Tk.Tk):
 
     def open_mqtt_settings(self):
         current_mqtt_config = self.current_configuration["mqtt_settings"]
-        MqttConfigWindow(self, current_mqtt_config, save_callback=self.apply_mqtt_config_changes)
+        MqttSettingsWindow.open_or_focus(self, current_mqtt_config, save_callback=self.apply_mqtt_config_changes)
 
     def apply_mqtt_config_changes(self, new_mqtt_config):
         self.dcc_throttle.update_parameters(**new_mqtt_config)
@@ -270,7 +271,7 @@ class ThrottleApplication(Tk.Tk):
 
     def open_general_settings(self):
         current_general_config = self.current_configuration["general_settings"]
-        GeneralConfigWindow(self, current_general_config, save_callback=self.apply_general_config_changes)
+        GeneralSettingsWindow.open_or_focus(self, current_general_config, save_callback=self.apply_general_config_changes)
         
     def apply_general_config_changes(self, new_general_config):
         self.active_throttle.enable_audio(new_general_config["sound_enabled"])
@@ -278,7 +279,7 @@ class ThrottleApplication(Tk.Tk):
         logging.getLogger().setLevel(new_general_config["log_level"])
 
     def open_camera_tool(self):
-        CameraConfigWindow(self)
+        CameraConfigUtility.open_or_focus(self)
 
     def open_help(self):
         messagebox.showinfo("Help", "Help documentation coming soon!")

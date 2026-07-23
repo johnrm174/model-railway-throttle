@@ -1,5 +1,5 @@
 esphome:
-  name: train-cab-cam
+  name: cabcam
   friendly_name: Train Cab Cam
 
 esp32:

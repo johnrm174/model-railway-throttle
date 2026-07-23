@@ -17,6 +17,7 @@ from . import mqtt_interface
 #--------------------------------------------------------------------------------------------------------
 
 class dial(Tk.Canvas):
+    
     def __init__(self, parent, size, label, min_val, max_val, tick_step, color="white"):
         super().__init__(parent, width=size, height=size, highlightthickness=0)
         self.size = size
@@ -33,16 +34,15 @@ class dial(Tk.Canvas):
         # Wipe the canvas clean
         self.delete("all")
         # Draw the instrument backing bezel
-        self.create_oval(self.center-self.radius, self.center-self.radius, 
-                         self.center+self.radius, self.center+self.radius, 
-                         fill="#1a1a1a", outline="#444", width=3)
+        self.create_oval(self.center-self.radius, self.center-self.radius, self.center+self.radius,
+                         self.center+self.radius, fill="#1a1a1a", outline="#444", width=3)
         # Render graduations and the center text label
         self.draw_ticks()
-        self.create_text(self.center, self.center + (self.radius * 0.4), 
-                         text=self.label_text, fill="White", font=("Arial", int(self.size/15), "bold"))
+        self.create_text(self.center, self.center + (self.radius * 0.4), text=self.label_text,
+                         fill="White", font=("Arial", int(self.size/15), "bold"))
         # Draw the physical indicator needle
-        self.needle = self.create_line(self.center, self.center, self.center, self.center, 
-                                       fill=self.needle_color, width=max(2, int(self.size/40)), capstyle="round")
+        self.needle = self.create_line(self.center, self.center, self.center, self.center,
+                         fill=self.needle_color, width=max(2, int(self.size/40)), capstyle="round")
         # Center cap hub
         self.create_oval(self.center-5, self.center-5, self.center+5, self.center+5, fill="#333")
         self.update_dial(self.min_val)
@@ -64,7 +64,7 @@ class dial(Tk.Canvas):
         for i in range(num_ticks):
             val = self.min_val + (i * self.tick_step)
             # 135 degrees is bottom-left; sweeps 270 degrees clockwise to bottom-right
-            angle = 135 + ((val - self.min_val) / total_range * 270)
+            angle = 135 + ((val - self.min_val) / total_range * 270) if total_range != 0 else 135
             rad = math.radians(angle)
             # Inner and outer coordinate pairs for tick lines
             x_outer = self.center + self.radius * 0.95 * math.cos(rad)
@@ -76,8 +76,7 @@ class dial(Tk.Canvas):
             if i % 2 == 0 or num_ticks < 10:
                 x_text = self.center + self.radius * 0.65 * math.cos(rad)
                 y_text = self.center + self.radius * 0.65 * math.sin(rad)
-                self.create_text(x_text, y_text, text=str(int(val)), 
-                                 fill="white", font=("Arial", int(self.size/15)))
+                self.create_text(x_text, y_text, text=str(int(val)), fill="white", font=("Arial", int(self.size/15)))
 
     def update_dial(self, value):
         value = max(self.min_val, min(self.max_val, value))
@@ -89,7 +88,7 @@ class dial(Tk.Canvas):
         x = self.center + self.radius * 0.85 * math.cos(rad)
         y = self.center + self.radius * 0.85 * math.sin(rad)
         self.coords(self.needle, self.center, self.center, x, y)
-        
+
 #--------------------------------------------------------------------------------------------------------
 # Class for a complex throttle Window
 #--------------------------------------------------------------------------------------------------------
@@ -115,12 +114,12 @@ class complex_throttle(Tk.LabelFrame):
         self.video_button_frame.pack(side=Tk.TOP, fill=Tk.X)
         self.video_button_frame.pack_propagate(False)
         # Bottom-left REV buttons
-        self.video_btn_rev = Tk.Button(self.video_button_frame, text="REV", font=('Arial', 8, 'bold'), fg="white",
-                                      bg="#444444", width=8, height=1, command=lambda: self.set_video_direction(False))
+        self.video_btn_rev = Tk.Button(self.video_button_frame, text="REV", font=('Arial', 8, 'bold'),
+                    fg="white", bg="#444444", width=8, height=1, command=lambda: self.set_video_direction(False))
         self.video_btn_rev.pack(side=Tk.LEFT, padx=5, pady=2)
         # Bottom-right FWD button
-        self.video_btn_fwd = Tk.Button(self.video_button_frame, text="FWD", font=('Arial', 8, 'bold'), fg="white",
-                                    bg="#444444", width=8, height=1, command=lambda: self.set_video_direction(True))
+        self.video_btn_fwd = Tk.Button(self.video_button_frame, text="FWD", font=('Arial', 8, 'bold'),
+                    fg="white", bg="#444444", width=8, height=1, command=lambda: self.set_video_direction(True))
         self.video_btn_fwd.pack(side=Tk.RIGHT, padx=5, pady=2)
         # --- UI Sub-Component: Control Desk Base Frame ---
         self.control_desk = Tk.Frame(self)
@@ -131,8 +130,8 @@ class complex_throttle(Tk.LabelFrame):
         left_lever_frame.pack_propagate(False) 
         Tk.Label(left_lever_frame, text="THROTTLE", font=('Arial', 10, 'bold')).pack(side=Tk.TOP)
         self.throttle_demand = Tk.DoubleVar(value=0)
-        self.throttle = Tk.Scale(left_lever_frame, from_=100, to=0, orient="vertical", width=50, length=320, state="disabled",
-                                 sliderlength=40, variable=self.throttle_demand, resolution=12.5, tickinterval=12.5, showvalue=0)
+        self.throttle = Tk.Scale(left_lever_frame, from_=100, to=0, orient="vertical", width=50, length=320,
+                state="disabled", sliderlength=40, variable=self.throttle_demand, resolution=12.5, tickinterval=12.5, showvalue=0)
         self.throttle.pack(side=Tk.TOP, fill=Tk.Y)
         # Center Column: Rolling Stock Mass Config & Dashboard Dials
         center_dashboard = Tk.Frame(self.control_desk)
@@ -165,23 +164,20 @@ class complex_throttle(Tk.LabelFrame):
         right_lever_frame.pack_propagate(False)
         Tk.Label(right_lever_frame, text="BRAKE", font=('Arial', 10, 'bold')).pack(side=Tk.TOP)
         self.brake_demand = Tk.DoubleVar(value=100)
-        self.brake = Tk.Scale(right_lever_frame, from_=100, to=0, orient="vertical", width=50, length=320, state="disabled",
-                               sliderlength=40, variable=self.brake_demand, resolution=5, tickinterval=20, showvalue=0)
+        self.brake = Tk.Scale(right_lever_frame, from_=100, to=0, orient="vertical", width=50, length=320,
+                state="disabled", sliderlength=40, variable=self.brake_demand, resolution=5, tickinterval=20, showvalue=0)
         self.brake.pack(side=Tk.TOP, fill=Tk.Y)
         # Bottom Sub-Component: Reverser and Emergency Protection Console
         button_console = Tk.Frame(self)
         button_console.pack(side=Tk.TOP, fill=Tk.X, padx=5, pady=(5, 5), ipady=5)
-        
-        self.btn_rev = Tk.Button(button_console, text="REV", font=('Arial', 10, 'bold'), 
-                                 width=6, height=2, state="disabled", command=lambda: self.set_direction(False))
+        self.btn_rev = Tk.Button(button_console, text="REV", font=('Arial', 10, 'bold'), width=6, height=2,
+                                 state="disabled", command=lambda: self.set_direction(False))
         self.btn_rev.pack(side=Tk.LEFT, expand=True, padx=5, pady=5)
-        self.btn_estop = Tk.Button(button_console, text="EMERGENCY\nSTOP", font=('Arial', 10, 'bold'), 
-                                   bg="#900", fg="white", activebackground="#f00", activeforeground="white",
-                                   width=14, height=2, state="disabled", command=self.trigger_emergency_stop)
+        self.btn_estop = Tk.Button(button_console, text="EMERGENCY\nSTOP", font=('Arial', 10, 'bold'), bg="#900", fg="white",
+                activebackground="#f00", activeforeground="white", width=14, height=2, state="disabled", command=self.trigger_emergency_stop)
         self.btn_estop.pack(side=Tk.LEFT, expand=True, padx=5, pady=5)
-        
-        self.btn_fwd = Tk.Button(button_console, text="FWD", font=('Arial', 10, 'bold'), 
-                                 width=6, height=2, state="disabled", command=lambda: self.set_direction(True))
+        self.btn_fwd = Tk.Button(button_console, text="FWD", font=('Arial', 10, 'bold'), width=6, height=2,
+                                 state="disabled", command=lambda: self.set_direction(True))
         self.btn_fwd.pack(side=Tk.LEFT, expand=True, padx=5, pady=5)
         # Loop and Thread Structural Targets
         self.next_physics_loop_event = None
@@ -196,6 +192,7 @@ class complex_throttle(Tk.LabelFrame):
         self.latest_frame = None
         self.video_status = None
         self.video_connect_generation = 0
+        self.video_state_lock = threading.Lock()
         # Locomotive Active State Placeholders
         self.loco_name = ""
         self.loco_mass = 0
@@ -220,15 +217,17 @@ class complex_throttle(Tk.LabelFrame):
         self.power_state_lock = threading.Lock()  # Protects actual_power and actual_brake
         # Procedural Audio Synth Variables
         self.sample_rate = 22050
-        self.stereo_buffer = numpy.zeros((8192, 2)) 
+        self.stereo_buffer = numpy.zeros((8192, 2))
         self.hiss_buffer_len = self.sample_rate * 2
         self.pre_baked_hiss = numpy.random.normal(0, 0.12, self.hiss_buffer_len) * 0.2
         self.audio_sample_index = 0
         self.hiss_playback_index = 0  # For modulo-based cycling instead of RNG
-        self.joint_spacing = 120.0 
+        self.joint_spacing = 120.0
         self.clack_lock = threading.Lock()
-        self.pending_clacks = [] 
+        self.pending_clacks = []
         self.active_clacks = []
+        # Ensure clack sample always exists, even before enable_audio() runs.
+        self.clack_sample = numpy.array([])
         # ON INIT: Reset dials/variables to default and fully enable all controls
         self.reset_to_defaults()
         self.set_controls_disabled_state(disabled=False)
@@ -242,7 +241,7 @@ class complex_throttle(Tk.LabelFrame):
         self.target_throttle = 0.0
         self.target_brake = 0.0
         self.actual_power = 0.0
-        self.actual_brake = 0.0  
+        self.actual_brake = 0.0
         self.current_speed = 0.0
         self.iterations = 0
         self.track_distance = 0.0
@@ -251,7 +250,7 @@ class complex_throttle(Tk.LabelFrame):
         if hasattr(self, 'active_clacks'): self.active_clacks.clear()
         # Set the throttle, brake sliders and direction buttons to their defaults
         self.throttle_demand.set(0)
-        self.brake_demand.set(100)  
+        self.brake_demand.set(100)
         self.dcc_direction = None
         self.update_direction_button_visuals()
         # Set the video defaults:
@@ -271,13 +270,18 @@ class complex_throttle(Tk.LabelFrame):
         self.btn_fwd.configure(state=state_val)
         self.btn_rev.configure(state=state_val)
         self.btn_estop.configure(state=state_val)
-        
+
     #----------------------------------------------------------------------------------------------------
     # Callback Function to update the load mass (and hence the total mass) of the train
     #----------------------------------------------------------------------------------------------------
 
     def mass_updated(self):
-        self.load_mass = self.load_mass_entry.get()
+        # Defensive parse to avoid transient widget value issues.
+        try:
+            raw_val = self.load_mass_entry.get()
+            self.load_mass = int(raw_val) if raw_val is not None else 0
+        except (ValueError, TypeError):
+            self.load_mass = 0
         self.total_mass = self.loco_mass + self.load_mass
         if self.loco_name:
             self.mass_text_label.configure(text=f"{self.loco_name} ({self.total_mass} Tonnes)")
@@ -285,12 +289,12 @@ class complex_throttle(Tk.LabelFrame):
     #----------------------------------------------------------------------------------------------------
     # Function to gracefully shut down the audio, video and physics loops on shutdown
     #----------------------------------------------------------------------------------------------------
-            
+
     def on_close(self):
         # 1. Immediately flag running loops to stop re-scheduling themselves
         self.video_running = False
         # 2. Cancel physics loops
-        if self.next_physics_loop_event: 
+        if self.next_physics_loop_event:
             try: self.after_cancel(self.next_physics_loop_event)
             except Exception: pass
             self.next_physics_loop_event = None
@@ -298,8 +302,11 @@ class complex_throttle(Tk.LabelFrame):
         self.cleanup_video()
         # 4. Halt audio safely
         if self.audio_stream:
-            try: self.audio_stream.abort()
-            except Exception: pass
+            try:
+                self.audio_stream.abort()
+                self.audio_stream.close()
+            except Exception:
+                pass
             self.audio_stream = None
 
     #----------------------------------------------------------------------------------------------------
@@ -314,7 +321,7 @@ class complex_throttle(Tk.LabelFrame):
             # Speed/Direction messages include the Session ID, Speed value and Direction Flag
             mqtt_message = {"sessionid": self.session_id, "speed": self.dcc_speed_value, "direction": self.dcc_direction}
             mqtt_interface.send_mqtt_message("dcc_locomotive_control_commands", 0, data=mqtt_message, retain=True,
-                    log_message=f"Loco Control: Publishing loco control message to broker :{mqtt_message}")
+                                log_message=f"Loco Control: Publishing loco control message to broker :{mqtt_message}")
         self.update_direction_button_visuals()
 
     def update_direction_button_visuals(self):
@@ -354,7 +361,7 @@ class complex_throttle(Tk.LabelFrame):
     #----------------------------------------------------------------------------------------------------
     # Video connection/disconnection and update functions.
     #----------------------------------------------------------------------------------------------------
-    
+
     def _set_video_failed(self, message):
         self.video_status = message
         self.video_running = False
@@ -373,55 +380,52 @@ class complex_throttle(Tk.LabelFrame):
             # Prefer FFmpeg backend for timeout controls
             cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
             # These may be backend-dependent; harmless if unsupported
-            try:
-                cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 2000)
-            except Exception:
-                pass
-            try:
-                cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 1000)
-            except Exception:
-                pass
-            try:
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            except Exception:
-                pass
+            try: cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 2000)
+            except Exception: pass
+            try: cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 1000)
+            except Exception: pass
+            try: cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception: pass
             # If user switched direction/stopped while connecting, discard
             if generation != self.video_connect_generation or not self.video_running:
-                if cap is not None:
-                    cap.release()
+                if cap is not None: cap.release()
                 return
             if cap is None or not cap.isOpened():
                 self.root_window.after(0, lambda: self.show_video_message("Unable to open video stream", color="red"))
-                if cap is not None:
-                    cap.release()
+                if cap is not None: cap.release()
                 return
             self.root_window.after(0, lambda: self.on_video_connected(cap, generation))
         except Exception as e:
             if cap is not None:
-                try:
-                    cap.release()
-                except Exception:
-                    pass
-            self.root_window.after(0, lambda: self.show_video_message(f"Video connection error: {e}", color="red"))
-
+                try: cap.release()
+                except Exception: pass
+            self.root_window.after(0, lambda e=e: self.show_video_message(f"Video connection error: {e}", color="red"))
+            
     def on_video_connected(self, capture_object, generation):
-        # stale connect result guard
-        if generation != self.video_connect_generation or not self.video_running:
-            capture_object.release()
-            return
-        self.video_capture = capture_object
-        self.video_status = None
-        with self.video_lock:
-            self.latest_frame = None
-        # Start blocking I/O in background thread
-        self.video_reader_thread = threading.Thread(target=self.video_reader_loop, args=(generation,), daemon=True)
-        self.video_reader_thread.start()
-        # Start lightweight UI paint loop (Tk thread only)
-        self.next_video_loop_event = self.root_window.after(30, self.update_video_stream)
+        # stale connect result guard + serialised state transition
+        with self.video_state_lock:
+            if generation != self.video_connect_generation or not self.video_running:
+                try: capture_object.release()
+                except Exception: pass
+                return
+            # Ensure previous capture is not left open.
+            if self.video_capture is not None and self.video_capture is not capture_object:
+                try: self.video_capture.release()
+                except Exception: pass
+            self.video_capture = capture_object
+            self.video_status = None
+            with self.video_lock:
+                self.latest_frame = None
+            # Start blocking I/O in background thread using a fixed capture reference.
+            self.video_reader_thread = threading.Thread(target=self.video_reader_loop, args=(capture_object, generation), daemon=True)
+            self.video_reader_thread.start()
+            # Start lightweight UI paint loop (Tk thread only).
+            self.next_video_loop_event = self.root_window.after(30, self.update_video_stream)
 
     def update_video_stream_source(self):
-        # Stop existing stream first
-        self.video_running = False
+        # Serialise source switch to prevent overlap with connect/cleanup.
+        with self.video_state_lock:
+            self.video_running = False
         self.cleanup_video()
         if self.video_direction is None:
             self.show_video_message("Select cab direction (FWD/REV) to start video")
@@ -432,51 +436,51 @@ class complex_throttle(Tk.LabelFrame):
             self.show_video_message(f"No {direction_name.lower()} video stream URL configured", color="orange")
             return
         self.show_video_message("Connecting to cab view...", color="orange")
-        self.video_running = True
-        self.video_connect_generation += 1
-        gen = self.video_connect_generation
+        with self.video_state_lock:
+            self.video_running = True
+            self.video_connect_generation += 1
+            gen = self.video_connect_generation
         threading.Thread(target=self.async_connect_video, args=(target_url, gen), daemon=True).start()
 
     def cleanup_video(self):
-        # Stop reader/render loops first
-        self.video_running = False
-        self.video_connect_generation += 1  # invalidate any in-flight async connect/readers
-        # Cancel UI render loop
-        if self.next_video_loop_event:
-            try:
-                self.after_cancel(self.next_video_loop_event)
-            except Exception:
-                pass
-            self.next_video_loop_event = None
-        # Release capture
-        if self.video_capture:
-            try:
-                self.video_capture.release()
-            except Exception:
-                pass
+        # Two-phase teardown:
+        # Phase A: under lock, mark state stopped/cancel timers and detach handles.
+        with self.video_state_lock:
+            self.video_running = False
+            self.video_connect_generation += 1  # invalidate any in-flight async connect/readers
+            if self.next_video_loop_event:
+                try: self.after_cancel(self.next_video_loop_event)
+                except Exception: pass
+                self.next_video_loop_event = None
+            t = self.video_reader_thread
+            self.video_reader_thread = None
+            cap = self.video_capture
             self.video_capture = None
-        # Clear buffered frame
-        with self.video_lock:
-            self.latest_frame = None
-        # Clear canvas layers safely (persistent image item + message tag)
+            self.video_status = None
+            with self.video_lock:
+                self.latest_frame = None
+        # Phase B: outside lock, join/release to avoid lock-related deadlocks.
+        if t and t.is_alive():
+            try: t.join(timeout=0.5)
+            except Exception: pass
+        if cap:
+            try: cap.release()
+            except Exception: pass
+        # Clear canvas layers safely (persistent image item + message tag).
         try:
             self.video_screen.delete("video_msg")
             self.video_screen.itemconfig(self.video_canvas_image_id, image="")
             self.video_screen.image = None
         except Exception:
             pass
-        self.video_reader_thread = None
-        self.video_status = None
 
-    def video_reader_loop(self, generation):
+    def video_reader_loop(self, cap, generation):
         fail_count = 0
         while self.video_running and generation == self.video_connect_generation:
-            cap = self.video_capture
-            if cap is None:
-                break
             try:
-                # This can block; runs off Tk thread now
+                # This can block; runs off Tk thread.
                 ret, frame = cap.read()
+                # Abort if this reader is stale or stream no longer active.
                 if generation != self.video_connect_generation or not self.video_running:
                     break
                 if not ret or frame is None:
@@ -525,7 +529,7 @@ class complex_throttle(Tk.LabelFrame):
                 self.show_video_message(self.video_status, color="red")
                 return
         self.next_video_loop_event = self.root_window.after(30, self.update_video_stream)
-        
+
     #----------------------------------------------------------------------------------------------------
     # Callback to handle Loco Emergency Stop
     #----------------------------------------------------------------------------------------------------
@@ -534,18 +538,16 @@ class complex_throttle(Tk.LabelFrame):
         # Speed/Direction messages include the Session ID, Speed value and Direction Flag
         mqtt_message = {"sessionid": self.session_id, "speed": 1, "direction": self.dcc_direction}
         mqtt_interface.send_mqtt_message("dcc_locomotive_control_commands", 0, data=mqtt_message, retain=True,
-                log_message=f"Loco Control: Publishing loco control message to broker :{mqtt_message}")
+                            log_message=f"Loco Control: Publishing loco control message to broker :{mqtt_message}")
         self.reset_to_defaults()
 
     #----------------------------------------------------------------------------------------------------
     # API FUNCTION to "set" a new loco
     #----------------------------------------------------------------------------------------------------
 
-    def update_parameters(self, loco_name:str, dcc_address:int, loco_mass_tonnes:int, loco_max_speed_mph:int, max_tractive_effort_lbf:int,
-                              traction_responsiveness:float, brake_responsiveness:float, dcc_speed_scaling:float, axle_offsets_ft:list, 
-                              fwd_stream_url:str, rev_stream_url:str, loco_horsepower:int):
-        self.video_running = False
-        # Kill running video loop
+    def update_parameters(self, loco_name:str, dcc_address:int, loco_mass_tonnes:int, loco_max_speed_mph:int, max_tractive_effort_lbf:int, 
+                            traction_responsiveness:float, brake_responsiveness:float, dcc_speed_scaling:float, 
+                            axle_offsets_ft:list, fwd_stream_url:str, rev_stream_url:str, loco_horsepower:int):
         self.cleanup_video()
         # Cancel any existing physics loop
         if self.next_physics_loop_event:
@@ -558,24 +560,20 @@ class complex_throttle(Tk.LabelFrame):
         # Bind incoming database attributes
         self.loco_name = loco_name
         self.dcc_address = dcc_address
-        self.dcc_speed_scaling = float(dcc_speed_scaling) 
+        self.dcc_speed_scaling = float(dcc_speed_scaling)
         self.loco_mass = loco_mass_tonnes
         self.loco_max_speed = loco_max_speed_mph
-        self.loco_horsepower = loco_horsepower 
+        self.loco_horsepower = loco_horsepower
         self.max_tractive_effort = max_tractive_effort_lbf
         self.traction_responsiveness = traction_responsiveness
         self.brake_responsiveness = brake_responsiveness
         self.axle_offsets = axle_offsets_ft
-        self.fwd_stream_url = fwd_stream_url.strip()
-        self.rev_stream_url = rev_stream_url.strip()
+        # Update the video stream source
+        self.fwd_stream_url = (fwd_stream_url or "").strip()
+        self.rev_stream_url = (rev_stream_url or "").strip()
+        self.update_video_stream_source()
         # --- Recalibrate the physical speed dial indicator max bounds ---
         self.speed_dial.recalibrate(new_max_val=self.loco_max_speed)
-#         # Handle showing or hiding the layout video widget box entirely
-#         if self.fwd_stream_url != "" or self.rev_stream_url != "":
-#             self.video_frame.pack(side=Tk.TOP, pady=5, before=self.control_desk)
-#         else:
-#             self.video_frame.pack_forget()
-        self.update_video_stream_source()
         # Safely pull and update tracking mass data strings
         try:
             entry_val = self.load_mass_entry.get()
@@ -590,7 +588,7 @@ class complex_throttle(Tk.LabelFrame):
     #----------------------------------------------------------------------------------------------------
     # API FUNCTION to enable/disable audio
     #----------------------------------------------------------------------------------------------------
-    
+
     def enable_audio(self, audio_enabled: bool):
         # 1. Gracefully teardown any existing stream
         if self.audio_stream:
@@ -605,24 +603,25 @@ class complex_throttle(Tk.LabelFrame):
         self.hiss_playback_index = 0
         # 3. Spin up the new stream if conditions are met
         if audio_enabled:
-            if self.axle_offsets == []:
+            if self.axle_offsets is None or self.axle_offsets == []:
                 self.axle_joint_indices = []
                 self.clack_sample = numpy.array([])
             else:
-                self.axle_joint_indices = [-1] * len(self.axle_offsets) 
+                self.axle_joint_indices = [-1] * len(self.axle_offsets)
                 # Synthesize a localized rail joint impact wave
-                duration = 0.5 
+                duration = 0.5
                 t_sample = numpy.linspace(0, duration, int(self.sample_rate * duration))
                 weight = numpy.sin(2 * numpy.pi * 40 * t_sample) * numpy.exp(-25.0 * t_sample)
                 brown_noise = numpy.cumsum(numpy.random.normal(0, 0.05, len(t_sample)))
-                brown_noise -= numpy.mean(brown_noise) 
+                brown_noise -= numpy.mean(brown_noise)
                 rumble = brown_noise * numpy.exp(-35.0 * t_sample)
                 impact = numpy.sin(2 * numpy.pi * 150 * t_sample) * numpy.exp(-120.0 * t_sample) * 0.2
-                self.clack_sample = ((weight + rumble + impact) / numpy.max(numpy.abs(weight + rumble + impact))) * 0.7
+                mix = weight + rumble + impact
+                denom = numpy.max(numpy.abs(mix))
+                self.clack_sample = ((mix / denom) * 0.7) if denom > 0 else numpy.array([])
             # Fire audio stream engine thread
             try:
-                self.audio_stream = sounddevice.OutputStream(channels=2, callback=self.audio_callback,
-                                                             samplerate=self.sample_rate, blocksize=8192)
+                self.audio_stream = sounddevice.OutputStream(channels=2, callback=self.audio_callback, samplerate=self.sample_rate, blocksize=8192)
                 self.audio_stream.start()
             except Exception as e:
                 logging.warning(f"Failed to start audio stream: {e}")
@@ -631,7 +630,7 @@ class complex_throttle(Tk.LabelFrame):
     #----------------------------------------------------------------------------------------------------
     # API FUNCTION to "activate" a new session (or release an existing session if session_id=0)
     #----------------------------------------------------------------------------------------------------
-    
+
     def activate_loco_session(self, session_id: int):
         self.session_id = session_id
         if self.session_id == 0:
@@ -655,7 +654,14 @@ class complex_throttle(Tk.LabelFrame):
         if self.session_id == 0:
             self.set_controls_disabled_state(disabled=True)
             self.next_physics_loop_event = self.root_window.after(100, self.update_physics)
-            return        
+            return
+        # Safety guard: avoid divide-by-zero / invalid mass conditions.
+        if self.total_mass <= 0:
+            self.speed_dial.update_dial(0)
+            self.power_dial.update_dial(0)
+            self.brake_dial.update_dial(0)
+            self.next_physics_loop_event = self.root_window.after(100, self.update_physics)
+            return
         # Cache Tkinter values to primitive thread-safe states for background audio thread consumption
         with self.brake_demand_lock:
             self.cached_brake_demand = float(self.brake_demand.get())
@@ -691,7 +697,7 @@ class complex_throttle(Tk.LabelFrame):
         if self.cached_brake_demand > 10.0 or self.actual_brake < 90.0:
             available_te = 0.0
         else:
-            throttle_pct = (self.target_throttle / 100.0) 
+            throttle_pct = (self.target_throttle / 100.0)
             crossover_speed = 3.5  # MPH boundary where curves shift
             if self.current_speed < crossover_speed:
                 # Low Speed: Adhesion limited
@@ -699,13 +705,13 @@ class complex_throttle(Tk.LabelFrame):
             else:
                 # High Speed: Horsepower limited cap
                 hp_limited_te = (self.loco_horsepower * 375 * throttle_pct) / max(0.01, self.current_speed)
-                available_te = min(hp_limited_te, throttle_pct * self.max_tractive_effort)   
+                available_te = min(hp_limited_te, throttle_pct * self.max_tractive_effort)
         # 7. Compute Davis Equation Rolling Resistance Forces
         if self.current_speed < 0.01:
             total_resistance = 0.0
         else:
             # Mechanical bearing resistance (res_a) is fully present the instant we move
-            res_a = self.total_mass * 2.5  
+            res_a = self.total_mass * 2.5
             res_b = self.current_speed * (self.total_mass * 0.05)
             res_c = (self.current_speed**2) * 0.25
             total_resistance = res_a + res_b + res_c
@@ -715,10 +721,10 @@ class complex_throttle(Tk.LabelFrame):
         # Net mechanical tractive calculation
         net_lbf = available_te - (total_resistance + braking_force_lbf)
         if self.current_speed < 0.01 and net_lbf < 0:
-            net_lbf = 0.0 
+            net_lbf = 0.0
         # 9. Calculate Acceleration (a = F/m) & Apply Time-Step Delta (dt = 0.1s)
         # 0.01097 converts lbs & tonnes to mph/s. 1.1 includes a 10% rotational inertia factor.
-        accel_mph_per_sec = (net_lbf / (self.total_mass * 1.1)) * 0.01097  
+        accel_mph_per_sec = (net_lbf / (self.total_mass * 1.1)) * 0.01097
         self.current_speed += accel_mph_per_sec * 0.1  # Exactly 100ms time step slice
         # 10. Wheel Joint Impact (Clack) Distance Tracker
         if self.axle_offsets is not None and self.current_speed > 0.01 and len(self.axle_joint_indices) > 0:
@@ -732,7 +738,7 @@ class complex_throttle(Tk.LabelFrame):
                     vol = min(1.3, self.current_speed / 40.0) # Sound volume correlates with physical speed
                     with self.clack_lock:
                         self.pending_clacks.append([0, vol])
-                    self.axle_joint_indices[i] = current_joint          
+                    self.axle_joint_indices[i] = current_joint
         # Apply strict clamp parameters
         if self.current_speed < 0.01: self.current_speed = 0
         if self.current_speed > self.loco_max_speed: self.current_speed = self.loco_max_speed
@@ -754,20 +760,11 @@ class complex_throttle(Tk.LabelFrame):
         if self.dcc_speed_value != old_dcc_speed_value:
             # Speed/Direction messages include the Session ID, Speed value and Direction Flag
             mqtt_message = {"sessionid": self.session_id, "speed": self.dcc_speed_value, "direction": self.dcc_direction}
-            mqtt_interface.send_mqtt_message("dcc_locomotive_control_commands", 0, data=mqtt_message, retain=True,
-                    log_message=f"Loco Control: Publishing loco control message to broker :{mqtt_message}")
+            mqtt_interface.send_mqtt_message("dcc_locomotive_control_commands", 0, data=mqtt_message, retain=True, log_message=f"Loco Control: Publishing loco control message to broker :{mqtt_message}")
         # Terminal Log Reporting (Outputs roughly once per second)
         self.iterations += 1
         if self.iterations % 10 == 0:
-            log_line = (
-                f"{self.loco_name:<9} | "
-                f"Speed: {self.current_speed:>5.2f} mph | "
-                f"Thrt Dem: {self.target_throttle:>3.0f}% ({self.actual_power:>3.0f}% Act) | "
-                f"TE: {available_te:>5.0f} lbs | "
-                f"Brake Dem: {self.cached_brake_demand:>3.0f}% (Pipe: {self.actual_brake:>5.1f}% -> {braking_force_lbf:>5.0f} lbs) | "
-                f"Res: {total_resistance:>5.0f} lbs | "
-                f"Net: {net_lbf:>6.0f} lbs | "
-                f"DCC Step: {self.dcc_speed_value:>3d}")
+            log_line = (f"{self.loco_name:<9} | " f"Speed: {self.current_speed:>5.2f} mph | " f"Thrt Dem: {self.target_throttle:>3.0f}% ({self.actual_power:>3.0f}% Act) | " f"TE: {available_te:>5.0f} lbs | " f"Brake Dem: {self.cached_brake_demand:>3.0f}% (Pipe: {self.actual_brake:>5.1f}% -> {braking_force_lbf:>5.0f} lbs) | " f"Res: {total_resistance:>5.0f} lbs | " f"Net: {net_lbf:>6.0f} lbs | " f"DCC Step: {self.dcc_speed_value:>3d}")
             logging.info(log_line)
         # Loop iteration schedule
         self.next_physics_loop_event = self.root_window.after(100, self.update_physics)
@@ -787,10 +784,10 @@ class complex_throttle(Tk.LabelFrame):
         t = (numpy.arange(frames) + self.audio_sample_index) / sr
         self.audio_sample_index += frames
         # Layer 1: Core square wave motor drone modifying frequency and volume dynamically with power notch
-        engine_audio = 0.3 * numpy.sign(numpy.sin(2 * numpy.pi * (15 + pwr * 35) * t) - 0.4) 
+        engine_audio = 0.3 * numpy.sign(numpy.sin(2 * numpy.pi * (15 + pwr * 35) * t) - 0.4)
         engine_audio *= (0.7 + 0.3 * numpy.sin(2 * numpy.pi * (3 + pwr * 8) * t)) * (0.12 + (pwr * 0.25))
         # Layer 2: Compressed air venting hiss (triggers during brake line pressure drops)
-        hiss_audio = self.stereo_buffer[:frames, 0] 
+        hiss_audio = self.stereo_buffer[:frames, 0]
         hiss_audio[:] = 0.0
         # Safe thread lookup pointing to our internal numeric variable swap instead of the Tk object
         with self.brake_demand_lock:
@@ -802,7 +799,7 @@ class complex_throttle(Tk.LabelFrame):
             self.hiss_playback_index = (self.hiss_playback_index + frames * 7) % (self.hiss_buffer_len - frames - 1)
             hiss_audio = self.pre_baked_hiss[self.hiss_playback_index : self.hiss_playback_index + frames]
         # Layer 3: Dynamic wheel joint click mixing loop
-        clack_audio = self.stereo_buffer[:frames, 1] 
+        clack_audio = self.stereo_buffer[:frames, 1]
         clack_audio[:] = 0.0
         if self.pending_clacks:
             with self.clack_lock:
@@ -813,10 +810,11 @@ class complex_throttle(Tk.LabelFrame):
             idx, vol = clack[0], clack[1]
             remaining_samples = len(self.clack_sample) - idx
             play_len = min(frames, remaining_samples)
-            clack_audio[:play_len] += self.clack_sample[idx : idx + play_len] * vol
-            clack[0] += play_len 
+            if play_len > 0:
+                clack_audio[:play_len] += self.clack_sample[idx : idx + play_len] * vol
+            clack[0] += play_len
             # Temporarily duck (lower) engine volume on sudden joint impacts for enhanced clarity/punch
-            if idx < (sr * 0.15): 
+            if idx < (sr * 0.15):
                 ducking_factor = 0.35
         self.active_clacks = [c for c in self.active_clacks if c[0] < len(self.clack_sample)]
         # Render clean stereo out frame signals
