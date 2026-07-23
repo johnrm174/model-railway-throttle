@@ -143,9 +143,9 @@ class LocoConfigWindow(Tk.Toplevel):
         self.current_preview_url = ""
         # 3. Clear canvas image references to free up memory buffers
         try:
-            self.preview_canvas.delete("all")
-            if hasattr(self.preview_canvas, "image"):
-                del self.preview_canvas.image
+            self.preview_canvas.itemconfig(self.preview_image_id, image="")
+            self.preview_canvas.delete("preview_text")
+            self.preview_canvas.image = None
         except Exception:
             pass # UI widgets might already be closing, pass safely
         # 4. Clear active-instance tracker
