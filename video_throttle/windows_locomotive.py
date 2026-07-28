@@ -48,6 +48,9 @@ class LocoConfigWindow(Tk.Toplevel):
         # Tracking dictionaries for discovered cameras
         self.discovered_cameras = {
             "None": "", "Manual URL Entry": ""}
+        self.scan_interval_ms = 1000
+        self.scan_thread = None
+        self.scan_in_progress = False
         self.preview_thread_running = False
         self.current_preview_url = ""
         self.last_preview_selection_label = "None"
@@ -124,11 +127,15 @@ class LocoConfigWindow(Tk.Toplevel):
             on_reset=self.reset_to_original,
             on_cancel=self.close_window)
         control_bar.pack(fill=Tk.X, pady=10, side=Tk.BOTTOM)
-        # Trigger clean network discovery thread
-        threading.Thread(target=self.scan_network, daemon=True).start()
+        # Ensure comboboxes always have baseline options even before/without discovery.
+        self.update_camera_dropdown_values()
+        self.entries["fwd_stream_url"].set("None")
+        self.entries["rev_stream_url"].set("None")
+        # Start periodic discovery loop
+        self._schedule_discovery_tick()
         # Handle close cleanup to stop streaming threads safely
         self.protocol("WM_DELETE_WINDOW", self.close_window)
-
+        
     # -------------------------------------------------------------------------
     # Safely shut down everything on window close
     # -------------------------------------------------------------------------
@@ -136,6 +143,8 @@ class LocoConfigWindow(Tk.Toplevel):
     def close_window(self):
         self.stop_preview_stream()
         self.current_preview_url = ""
+        # Stop the periodic network scan
+        self.scan_in_progress = False
         # 1. Break the loop inside stream_worker instantly
         self.preview_thread_running = False
         self.preview_generation += 1
@@ -158,10 +167,26 @@ class LocoConfigWindow(Tk.Toplevel):
     # Network Scanning Logic
     # -------------------------------------------------------------------------
 
+    def _schedule_discovery_tick(self):
+        # Tk-thread scheduler: run every scan_interval_ms
+        if not self.winfo_exists():
+            return
+        self._run_discovery_if_idle()
+        self.after(self.scan_interval_ms, self._schedule_discovery_tick)
+
+    def _run_discovery_if_idle(self):
+        # Don't start another scan if previous scan thread still running
+        if self.scan_in_progress:
+            return
+        self.scan_in_progress = True
+        self.scan_thread = threading.Thread(target=self.scan_network, daemon=True)
+        self.scan_thread.start()
+        
     def scan_network(self):
         class ESPHomeDiscovery:
             def __init__(self, callback):
                 self.callback = callback
+                
             def add_service(self, zc, type_, name):
                 info = zc.get_service_info(type_, name)
                 if info:
@@ -174,18 +199,31 @@ class LocoConfigWindow(Tk.Toplevel):
                         # ESPHome camera default streaming port is 8080
                         url = f"http://{ip}:8080"
                         self.callback(clean_name, url)
+
             def update_service(self, zc, type_, name):
                 pass
 
             def remove_service(self, zc, type_, name):
                 pass
-        zeroconf = Zeroconf()
-        listener = ESPHomeDiscovery(self.register_discovered_camera)
-        # Use the underscore to silence the pyflakes warning about unused variable
-        _ = ServiceBrowser(zeroconf, ["_esphomelib._tcp.local.", "_http._tcp.local."], listener)
-        time.sleep(2.0)  # Scan broadcasts for 2 seconds
-        zeroconf.close()
 
+        zeroconf = None
+        try:
+            # Rebuild discovered map each scan, preserving baseline choices.
+            self.discovered_cameras = {"None": "", "Manual URL Entry": ""}
+            self.after(0, self.update_camera_dropdown_values)
+            zeroconf = Zeroconf()
+            listener = ESPHomeDiscovery(self.register_discovered_camera)
+            _ = ServiceBrowser(zeroconf, ["_esphomelib._tcp.local.", "_http._tcp.local."], listener)
+            # Listen for ~1 second per pass
+            time.sleep(1.0)
+        finally:
+            try:
+                if zeroconf is not None:
+                    zeroconf.close()
+            except Exception:
+                pass
+            self.scan_in_progress = False
+    
     def register_discovered_camera(self, name, url):
         display_label = f"{name} ({url})"
         self.discovered_cameras[display_label] = url
@@ -196,13 +234,22 @@ class LocoConfigWindow(Tk.Toplevel):
         options = list(self.discovered_cameras.keys())
         for key in ["fwd_stream_url", "rev_stream_url"]:
             combo = self.entries[key]
-            current_val = combo.get()
-            combo['values'] = options
-            # Map backwards if the saved config matches an IP we just discovered
+            current_val = combo.get().strip()
+            combo["values"] = options
+            # Preserve explicit baseline selections if chosen
+            if current_val in self.discovered_cameras:
+                combo.set(current_val)
+                continue
+            # Map saved raw URL -> discovered label when possible
+            mapped = False
             for label, url in self.discovered_cameras.items():
-                if current_val == url:
+                if current_val and current_val == url:
                     combo.set(label)
+                    mapped = True
                     break
+            # If nothing selected yet, default to "None"
+            if not current_val and not mapped:
+                combo.set("None")
 
     # -------------------------------------------------------------------------
     # Preview Handler

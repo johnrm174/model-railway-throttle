@@ -193,6 +193,8 @@ class complex_throttle(Tk.LabelFrame):
         self.video_status = None
         self.video_connect_generation = 0
         self.video_state_lock = threading.Lock()
+        self.video_switch_lock = threading.Lock()
+        self.last_video_switch_ts = 0.0
         # Locomotive Active State Placeholders
         self.loco_name = ""
         self.loco_mass = 0
@@ -423,24 +425,31 @@ class complex_throttle(Tk.LabelFrame):
             self.next_video_loop_event = self.root_window.after(30, self.update_video_stream)
 
     def update_video_stream_source(self):
-        # Serialise source switch to prevent overlap with connect/cleanup.
-        with self.video_state_lock:
-            self.video_running = False
-        self.cleanup_video()
-        if self.video_direction is None:
-            self.show_video_message("Select cab direction (FWD/REV) to start video")
-            return
-        target_url = self.fwd_stream_url if self.video_direction is True else self.rev_stream_url
-        direction_name = "Forward" if self.video_direction is True else "Reverse"
-        if not target_url:
-            self.show_video_message(f"No {direction_name.lower()} video stream URL configured", color="orange")
-            return
-        self.show_video_message("Connecting to cab view...", color="orange")
-        with self.video_state_lock:
-            self.video_running = True
-            self.video_connect_generation += 1
-            gen = self.video_connect_generation
-        threading.Thread(target=self.async_connect_video, args=(target_url, gen), daemon=True).start()
+        # Global serialisation + debounce to avoid rapid teardown/reopen races in native FFmpeg.
+        with self.video_switch_lock:
+            now = time.monotonic()
+            # Ignore extremely rapid repeats (e.g. double-click/toggle jitter)
+            if now - self.last_video_switch_ts < 0.25:
+                return
+            self.last_video_switch_ts = now
+            # Serialise source switch to prevent overlap with connect/cleanup.
+            with self.video_state_lock:
+                self.video_running = False
+            self.cleanup_video()
+            if self.video_direction is None:
+                self.show_video_message("Select cab direction (FWD/REV) to start video")
+                return
+            target_url = self.fwd_stream_url if self.video_direction is True else self.rev_stream_url
+            direction_name = "Forward" if self.video_direction is True else "Reverse"
+            if not target_url:
+                self.show_video_message(f"No {direction_name.lower()} video stream URL configured", color="orange")
+                return
+            self.show_video_message("Connecting to cab view...", color="orange")
+            with self.video_state_lock:
+                self.video_running = True
+                self.video_connect_generation += 1
+                gen = self.video_connect_generation
+            threading.Thread(target=self.async_connect_video, args=(target_url, gen), daemon=True).start()
 
     def cleanup_video(self):
         # Two-phase teardown:
@@ -460,12 +469,20 @@ class complex_throttle(Tk.LabelFrame):
             with self.video_lock:
                 self.latest_frame = None
         # Phase B: outside lock, join/release to avoid lock-related deadlocks.
+        # IMPORTANT: never release cap from this thread if reader may still be in cap.read()
+        # (can crash in native FFmpeg/OpenCV).
+        reader_alive = False
         if t and t.is_alive():
-            try: t.join(timeout=0.5)
-            except Exception: pass
-        if cap:
-            try: cap.release()
-            except Exception: pass
+            try:
+                t.join(timeout=1.5)
+            except Exception:
+                pass
+            reader_alive = t.is_alive()
+        if cap and not reader_alive:
+            try:
+                cap.release()
+            except Exception:
+                pass
         # Clear canvas layers safely (persistent image item + message tag).
         try:
             self.video_screen.delete("video_msg")
@@ -476,29 +493,36 @@ class complex_throttle(Tk.LabelFrame):
 
     def video_reader_loop(self, cap, generation):
         fail_count = 0
-        while self.video_running and generation == self.video_connect_generation:
-            try:
-                # This can block; runs off Tk thread.
-                ret, frame = cap.read()
-                # Abort if this reader is stale or stream no longer active.
-                if generation != self.video_connect_generation or not self.video_running:
-                    break
-                if not ret or frame is None:
-                    fail_count += 1
-                    if fail_count >= 3:
-                        self._fail_video_from_worker("Video stream lost")
+        try:
+            while self.video_running and generation == self.video_connect_generation:
+                try:
+                    # This can block; runs off Tk thread.
+                    ret, frame = cap.read()
+                    # Abort if this reader is stale or stream no longer active.
+                    if generation != self.video_connect_generation or not self.video_running:
                         break
-                    time.sleep(0.05)
-                    continue
-                fail_count = 0
-                frame = cv2.resize(frame, (480, 270))
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                with self.video_lock:
-                    self.latest_frame = frame
-            except Exception as e:
-                logging.warning(f"Video reader error: {e}")
-                self._fail_video_from_worker("Video stream error")
-                break
+                    if not ret or frame is None:
+                        fail_count += 1
+                        if fail_count >= 3:
+                            self._fail_video_from_worker("Video stream lost")
+                            break
+                        time.sleep(0.05)
+                        continue
+                    fail_count = 0
+                    frame = cv2.resize(frame, (480, 270))
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    with self.video_lock:
+                        self.latest_frame = frame
+                except Exception as e:
+                    logging.warning(f"Video reader error: {e}")
+                    self._fail_video_from_worker("Video stream error")
+                    break
+        finally:
+            # Reader thread owns final release of the capture it was given.
+            try:
+                cap.release()
+            except Exception:
+                pass
 
     # ----------------------------------------------------------------------------------------------------
     # This is now a UI paint loop only (non-blocking)

@@ -1,7 +1,7 @@
 # Absolute package imports
 from . import loco_control
 from . import dcc_control
-from .windows_configuration import LocoConfigWindow
+from .windows_locomotive import LocoConfigWindow
 from .windows_settings import MqttSettingsWindow, GeneralSettingsWindow
 from .windows_utilities import CameraConfigUtility
 
@@ -35,12 +35,12 @@ class ThrottleApplication(Tk.Tk):
         file_menu.add_command(label="Save", command=self.save_throttle_file)
         file_menu.add_command(label="Save As...", command=self.save_throttle_file_as)
         file_menu.add_separator()
+        file_menu.add_command(label="Configure...", command=self.open_loco_config)
+        file_menu.add_separator()
         file_menu.add_command(label="Examples...", command=self.load_example_file)
         file_menu.add_separator()
         file_menu.add_command(label="Quit", command=self.on_exit)
-        menubar.add_cascade(label="File", menu=file_menu)
-        # Locomotive Menu Entry (direct action, no submenu)
-        menubar.add_command(label="Locomotive", command=self.open_loco_config)
+        menubar.add_cascade(label="Locomotive", menu=file_menu)
         # Settings Menu
         settings_menu = Tk.Menu(menubar, tearoff=0)
         settings_menu.add_command(label="MQTT...", command=self.open_mqtt_settings)

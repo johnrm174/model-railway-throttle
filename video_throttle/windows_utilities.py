@@ -208,19 +208,24 @@ class CameraConfigUtility(Tk.Toplevel):
         self.save_as_button = Tk.Button(file_group, text="Save as...", width=14, command=lambda: self.save_file(save_as=True))
         self.save_as_button.grid(row=1, column=3, pady=(8, 0), padx=(5, 0))
         # ---------------------------------------------------------
-        # WiFi group
+        # WiFi + Device Metadata row (side-by-side)
         # ---------------------------------------------------------
-        wifi_group = Tk.LabelFrame(form_frame, text="WiFi Settings", padx=10, pady=10)
-        wifi_group.pack(fill=Tk.X, pady=(0, 10))
-        wifi_fields = [("SSID:", string_entry_box, "ssid", {"max_length": 32, "tooltip": "Wireless network name."}), ("Password:", string_entry_box, "password", {"max_length": 64, "tooltip": "Wireless password."})]
-        self.render_fields(wifi_group, wifi_fields)
-        # ---------------------------------------------------------
-        # Device metadata group
-        # ---------------------------------------------------------
-        metadata_group = Tk.LabelFrame(form_frame, text="Device Metadata", padx=10, pady=10)
-        metadata_group.pack(fill=Tk.X, pady=(0, 10))
-        metadata_fields = [("Device Name:", string_entry_box, "device_name", {"max_length": 10, "tooltip": "Device identifier (lowercase, no spaces, max 10 characters)"}), ("Friendly Name:", string_entry_box, "friendly_name", {"max_length": 50, "tooltip": "Human-readable name"})]
-        self.render_fields(metadata_group, metadata_fields)
+        top_settings_row = Tk.Frame(form_frame)
+        top_settings_row.pack(fill=Tk.X, pady=(0, 10))
+        # WiFi group (left)
+        wifi_group = Tk.LabelFrame(top_settings_row, text="WiFi Settings", padx=10, pady=10)
+        wifi_group.pack(side=Tk.LEFT, fill=Tk.BOTH, expand=True, padx=(0, 5))
+        wifi_fields = [
+            ("SSID:", string_entry_box, "ssid", {"max_length": 32, "tooltip": "Wireless network name."}),
+            ("Password:", string_entry_box, "password", {"max_length": 64, "tooltip": "Wireless password."}),]
+        self.render_fields(wifi_group, wifi_fields, field_width=18)
+        # Device metadata group (right)
+        metadata_group = Tk.LabelFrame(top_settings_row, text="Device Metadata", padx=10, pady=10)
+        metadata_group.pack(side=Tk.LEFT, fill=Tk.BOTH, expand=True, padx=(5, 0))
+        metadata_fields = [
+            ("Device Name:", string_entry_box, "device_name", {"max_length": 10, "tooltip": "Device identifier (lowercase, no spaces, max 10 characters)"}),
+            ("Friendly Name:", string_entry_box, "friendly_name", {"max_length": 50, "tooltip": "Human-readable name"}),]
+        self.render_fields(metadata_group, metadata_fields, field_width=18)
         # ---------------------------------------------------------
         # Camera settings group
         # ---------------------------------------------------------
@@ -230,13 +235,23 @@ class CameraConfigUtility(Tk.Toplevel):
         FRAME_RATE_OPTIONS = ["1", "5", "10", "15", "20", "25", "30", "60"]
         JPEG_QUALITY_OPTIONS = [str(i) for i in range(10, 64, 5)]
         FRAME_BUFFER_OPTIONS = ["1", "2", "3", "4"]
-        camera_fields = [("Resolution:", dropdown_box, "resolution", {"values": RESOLUTION_OPTIONS, "tooltip": "Frame resolution (UXGA down to QQVGA)"}), ("Frame Rate:", dropdown_box, "frame_rate", {"values": FRAME_RATE_OPTIONS, "tooltip": "Maximum camera frame rate (fps)"}), ("JPEG Quality:", dropdown_box, "jpeg_quality", {"values": JPEG_QUALITY_OPTIONS, "tooltip": "JPEG quality (10 is best quality, 63 is lowest)"}), ("Frame Buffers:", dropdown_box, "frame_buffers", {"values": FRAME_BUFFER_OPTIONS, "tooltip": "Number of camera frame buffers in PSRAM"})]
-        self.render_fields(camera_group, camera_fields)
-        self.vflip = check_box(camera_group, width=30, label="Vertical Flip", tooltip="Flip image vertically.")
-        self.vflip.grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        camera_fields = [
+            ("Resolution:", dropdown_box, "resolution", {"values": RESOLUTION_OPTIONS, "tooltip": "Frame resolution (UXGA down to QQVGA)"}),
+            ("Frame Rate:", dropdown_box, "frame_rate", {"values": FRAME_RATE_OPTIONS, "tooltip": "Maximum camera frame rate (fps)"}),
+            ("JPEG Quality:", dropdown_box, "jpeg_quality", {"values": JPEG_QUALITY_OPTIONS, "tooltip": "JPEG quality (10 is best quality, 63 is lowest)"}),
+            ("Frame Buffers:", dropdown_box, "frame_buffers", {"values": FRAME_BUFFER_OPTIONS, "tooltip": "Number of camera frame buffers in PSRAM"}),]
+        self.render_fields(camera_group, camera_fields, field_width=10)
+        # Reserve and center right-side area for checkboxes
+        camera_group.columnconfigure(0, weight=0)  # labels
+        camera_group.columnconfigure(1, weight=0)  # dropdowns
+        camera_group.columnconfigure(2, weight=1)  # spacer
+        camera_group.columnconfigure(3, weight=1)  # checkbox area left
+        camera_group.columnconfigure(4, weight=1)  # checkbox area right
+        self.vflip = check_box(camera_group, width=20, label="Vertical Flip", tooltip="Flip image vertically.")
+        self.vflip.grid(row=1, column=3, columnspan=2, sticky="n", padx=(20, 10), pady=(0, 4))
         self.entries["vertical_flip"] = self.vflip
-        self.hmirror = check_box(camera_group, width=30, label="Horizontal Mirror", tooltip="Mirror image horizontally.")
-        self.hmirror.grid(row=5, column=0, columnspan=2, sticky="w")
+        self.hmirror = check_box(camera_group, width=20, label="Horizontal Mirror", tooltip="Mirror image horizontally.")
+        self.hmirror.grid(row=2, column=3, columnspan=2, sticky="n", padx=(20, 10), pady=(4, 0))
         self.entries["horizontal_mirror"] = self.hmirror
         # ---------------------------------------------------------
         # Flash/build + log group
@@ -294,16 +309,21 @@ class CameraConfigUtility(Tk.Toplevel):
         CameraConfigUtility._instance = None
         self.destroy()
 
-    def render_fields(self, container, fields):
+    def render_fields(self, container, fields, field_width=None):
         # Shared dynamic field renderer for text/dropdown rows.
         container.columnconfigure(1, weight=1)
         for row, (label_text, widget_class, key, extra_args) in enumerate(fields):
             Tk.Label(container, text=label_text, anchor="w").grid(row=row, column=0, sticky="ew", padx=(0, 10), pady=4)
-            width = 30 if widget_class == string_entry_box else 8
+
+            if field_width is not None:
+                width = field_width
+            else:
+                width = 30 if widget_class == string_entry_box else 8
+
             widget = widget_class(container, width=width, **extra_args)
             widget.grid(row=row, column=1, sticky="w", pady=4)
             self.entries[key] = widget
-
+            
     def _is_widget_valid(self, widget):
         # Preferred path: widget supplies explicit is_valid().
         if hasattr(widget, "is_valid") and callable(widget.is_valid):
@@ -405,9 +425,32 @@ class CameraConfigUtility(Tk.Toplevel):
         return True
 
     def detect_ports(self):
+        #---------------------------------------------------------
+        # Function to determine if a port 'looks like' a USB port
+        #---------------------------------------------------------
+        def _looks_like_usb_serial(port_info):
+            # Prefer explicit USB metadata when available
+            if getattr(port_info, "vid", None) is not None or getattr(port_info, "pid", None) is not None:
+                return True
+            # Fallback heuristics by platform naming/description/hwid
+            dev = (getattr(port_info, "device", "") or "").lower()
+            desc = (getattr(port_info, "description", "") or "").lower()
+            hwid = (getattr(port_info, "hwid", "") or "").lower()
+            usb_name_hits = ("ttyusb", "ttyacm", "cu.usb", "usbserial")
+            usb_text_hits = ("usb", "cp210", "ch340", "ftdi", "silicon labs", "arduino", "esp32", "esp8266")
+            if any(tok in dev for tok in usb_name_hits):
+                return True
+            if any(tok in desc for tok in usb_text_hits):
+                return True
+            if "usb" in hwid:
+                return True
+            return False
+        #---------------------------------------------------------
+        # Main Class Method starts here
+        #---------------------------------------------------------
         # Enumerate currently connected serial ports and fill combobox.
         active_ports = serial.tools.list_ports.comports()
-        port_list = [port.device for port in active_ports if getattr(port, "device", None)]
+        port_list = [port.device for port in active_ports if getattr(port, "device", None) and _looks_like_usb_serial(port)]        
         if port_list:
             self.device_combobox["values"] = port_list
             # Pick a practical default:

@@ -1,27 +1,37 @@
 esphome:
   name: cabcam
   friendly_name: Train Cab Cam
+  platformio_options:
+    board_build.flash_mode: dio
+    board_build.mcu: esp32s3
+    board_build.extra_flags:
+      - "-DARDUINO_HW_CDC_ON_BOOT=0"
+    # Drop the chip clock from 240MHz down to a much cooler 160MHz or 80MHz
+    board_build.f_cpu: 160000000L
+    # This explicitly tells ESPHome that Octal PSRAM is present on the board
+    board_build.arduino.memory_type: qio_opi
 
 esp32:
   board: seeed_xiao_esp32s3
   variant: esp32s3
   framework:
-    type: esp-idf
+    type: arduino
 
+# Explicit, valid top-level component declaration 
+# required by newer ESPHome versions for the ESP32-S3 chip variant.
 psram:
   mode: octal
-  speed: 80MHz
 
-# Change these to your actual home layout Wi-Fi details
 wifi:
-  ssid: "BT-FMAKT2"
-  password: "yyyy"
+  ssid: ""
+  password: ""
   power_save_mode: none
   output_power: 8.5dB
 
 # Enable logging via the USB Serial link
 logger:
   level: DEBUG
+  hardware_uart: USB_SERIAL_JTAG
 
 # Activates a direct web page stream
 esp32_camera_web_server:
@@ -41,11 +51,15 @@ esp32_camera:
   vsync_pin: GPIO38
   href_pin: GPIO47
   pixel_clock_pin: GPIO13
-
   # Perfect layout frame size balancing clarity and frame rate
   resolution: 640x480
-  max_framerate: 24 fps
-  jpeg_quality: 16
-  vertical_flip: true
+  max_framerate: 10 fps
+  jpeg_quality: 10
+  vertical_flip: false
   horizontal_mirror: false
   frame_buffer_count: 2
+  # PICTURE QUALITY ADJUSTMENTS FOR MODEL RAILWAYS:
+  # Values range from -2 to 2 (Default is 0). 
+  # Setting these to 1 or 2 helps pop details out in darker room layouts or tunnels.
+  brightness: 1
+  contrast: 1
