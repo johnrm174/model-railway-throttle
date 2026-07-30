@@ -1,6 +1,6 @@
 esphome:
   name: cabcam
-  friendly_name: Train Cab Cam
+  friendly_name: Train Cab Camera
   platformio_options:
     board_build.flash_mode: dio
     board_build.mcu: esp32s3
@@ -17,14 +17,14 @@ esp32:
   framework:
     type: arduino
 
-# Explicit, valid top-level component declaration 
-# required by newer ESPHome versions for the ESP32-S3 chip variant.
 psram:
   mode: octal
 
 wifi:
-  ssid: ""
-  password: ""
+  networks:
+    - ssid: ""
+      password: ""
+      priority: 5
   power_save_mode: none
   output_power: 8.5dB
 
@@ -38,9 +38,9 @@ esp32_camera_web_server:
   - port: 8080
     mode: stream
 
-# The exact pinout configuration required for the Sense camera board
 esp32_camera:
   name: "Cab View"
+  # The exact pinout configuration required for the Sense camera board
   external_clock:
     pin: GPIO10
     frequency: 20MHz
@@ -51,15 +51,12 @@ esp32_camera:
   vsync_pin: GPIO38
   href_pin: GPIO47
   pixel_clock_pin: GPIO13
-  # Perfect layout frame size balancing clarity and frame rate
+  # Optimised settings for balancing clarity and frame rate
   resolution: 640x480
-  max_framerate: 10 fps
-  jpeg_quality: 10
-  vertical_flip: false
+  max_framerate: 20 fps
+  jpeg_quality: 25
+  vertical_flip: true
   horizontal_mirror: false
-  frame_buffer_count: 2
-  # PICTURE QUALITY ADJUSTMENTS FOR MODEL RAILWAYS:
-  # Values range from -2 to 2 (Default is 0). 
-  # Setting these to 1 or 2 helps pop details out in darker room layouts or tunnels.
-  brightness: 1
-  contrast: 1
+  frame_buffer_count: 1
+  brightness: 0
+  contrast: 0

@@ -10,13 +10,13 @@ import tkinter as Tk
 from tkinter import filedialog, messagebox, ttk
 from importlib import resources
 import serial.tools.list_ports
-from .widgets import dropdown_box, string_entry_box, check_box
+from .widgets import dropdown_box, string_entry_box, check_box, CreateToolTip
 
-# -----------------------------------------------------------------------------
+#--------------------------------------------------------------------------------------
 # ESPHome YAML Wrapper -Small model wrapper around the ESPHome YAML dictionary.
 #   - Holds original template and current editable data
 #   - Exposes property accessors used by the UI layer
-# -----------------------------------------------------------------------------
+#--------------------------------------------------------------------------------------
 
 class ESPHomeYaml:
     def __init__(self, template_dictionary):
@@ -43,20 +43,48 @@ class ESPHomeYaml:
         if self.filename is None:
             raise RuntimeError("No filename has been specified.")
         with open(self.filename, "w", encoding="utf-8") as f:
-            yaml.dump(self.data, f, sort_keys=False)
+            yaml.dump(self.data, f, sort_keys=False, default_flow_style=False)
 
-    # -----------------------------
-    # WiFi properties
-    # -----------------------------
+    #-----------------------------
+    # Camera Metadata
+    #-----------------------------
     
     @property
-    def ssid(self):
-        return self.data.get("wifi", {}).get("ssid", "")
+    def device_name(self):
+        return self.data.get("esphome", {}).get("name", "")
 
-    @ssid.setter
-    def ssid(self, value):
+    @device_name.setter
+    def device_name(self, value):
+        self.data.setdefault("esphome", {})
+        self.data["esphome"]["name"] = value
+
+    @property
+    def friendly_name(self):
+        return self.data.get("esphome", {}).get("friendly_name", "")
+
+    @friendly_name.setter
+    def friendly_name(self, value):
+        self.data.setdefault("esphome", {})
+        self.data["esphome"]["friendly_name"] = value
+
+    #-----------------------------
+    # WiFi properties
+    #-----------------------------
+
+    @property
+    def wifi_networks(self):
+        # Return list of network dicts with ssid, password, priority
+        networks = self.data.get("wifi", {}).get("networks", [])
+        # Ensure we always return a list (even if empty)
+        return networks if isinstance(networks, list) else []
+
+    @wifi_networks.setter
+    def wifi_networks(self, value):
         self.data.setdefault("wifi", {})
-        self.data["wifi"]["ssid"] = value
+        if value and isinstance(value, list):
+            self.data["wifi"]["networks"] = value
+        elif "networks" in self.data["wifi"]:
+            del self.data["wifi"]["networks"]
 
     @property
     def device_name(self):
@@ -76,18 +104,9 @@ class ESPHomeYaml:
         self.data.setdefault("esphome", {})
         self.data["esphome"]["friendly_name"] = value
 
-    @property
-    def password(self):
-        return self.data.get("wifi", {}).get("password", "")
-
-    @password.setter
-    def password(self, value):
-        self.data.setdefault("wifi", {})
-        self.data["wifi"]["password"] = value
-
-    # -----------------------------
+    #-----------------------------
     # Camera properties
-    # -----------------------------
+    #-----------------------------
     
     @property
     def resolution(self):
@@ -100,9 +119,14 @@ class ESPHomeYaml:
 
     @property
     def frame_rate(self):
-        # ESPHome stores frame rate text like "10 fps" in this field.
-        txt = str(self.data.get("esp32_camera", {}).get("max_framerate", "0 fps"))
-        return int(txt.split()[0]) if txt else 0
+        # FIXED: Robustly handle both "10 fps" and "10" formats
+        txt = str(self.data.get("esp32_camera", {}).get("max_framerate", "0"))
+        # Extract the numeric part (handles "10 fps" -> "10" or "10" -> "10")
+        txt_stripped = txt.split()[0] if txt else "0"
+        try:
+            return int(txt_stripped)
+        except ValueError:
+            return 0
 
     @frame_rate.setter
     def frame_rate(self, value):
@@ -144,41 +168,184 @@ class ESPHomeYaml:
     def horizontal_mirror(self, value):
         self.data.setdefault("esp32_camera", {})
         self.data["esp32_camera"]["horizontal_mirror"] = bool(value)
+        
+    @property
+    def brightness(self):
+        return self.data.get("esp32_camera", {}).get("brightness", 0)
 
-# -----------------------------------------------------------------------------
+    @brightness.setter
+    def brightness(self, value):
+        self.data.setdefault("esp32_camera", {})
+        self.data["esp32_camera"]["brightness"] = int(value)
+
+    @property
+    def contrast(self):
+        return self.data.get("esp32_camera", {}).get("contrast", 0)
+
+    @contrast.setter
+    def contrast(self, value):
+        self.data.setdefault("esp32_camera", {})
+        self.data["esp32_camera"]["contrast"] = int(value)
+
+#--------------------------------------------------------------------------------------
+# WiFi Network Entry Row - Single line with SSID, Password, Priority
+#--------------------------------------------------------------------------------------
+
+class wifi_network_entry(Tk.Frame):
+    def __init__(self, parent_frame, tooltip_ssid="", tooltip_password="", tooltip_priority="", **kwargs):
+        super().__init__(parent_frame)
+        # SSID entry
+        Tk.Label(self, text="SSID:").pack(side=Tk.LEFT, padx=(0, 5))
+        self.ssid = string_entry_box(self, width=18, max_length=32, 
+                                      tooltip=tooltip_ssid or "Network name (SSID)")
+        self.ssid.pack(side=Tk.LEFT, padx=(0, 15))
+        # Password entry
+        Tk.Label(self, text="Password:").pack(side=Tk.LEFT, padx=(0, 5))
+        self.password = string_entry_box(self, width=18, max_length=64, 
+                                          tooltip=tooltip_password or "Network password")
+        self.password.pack(side=Tk.LEFT, padx=(0, 15))
+        # Priority dropdown
+        Tk.Label(self, text="Priority:").pack(side=Tk.LEFT, padx=(0, 5))
+        PRIORITY_OPTIONS = ["10", "9", "8", "7", "6", "5", "4", "3", "2", "1"]
+        self.priority = dropdown_box(self, values=PRIORITY_OPTIONS, width=3,
+                                      tooltip=tooltip_priority or "Connection priority (10=highest, 1=lowest)")
+        self.priority.pack(side=Tk.LEFT)
+
+    def get_value(self):
+        return {'ssid': self.ssid.get(),'password': self.password.get(),
+                'priority': int(self.priority.get()) if self.priority.get() else 5}
+
+    def set_value(self, network_dict):
+        if isinstance(network_dict, dict):
+            self.ssid.set(network_dict.get('ssid', ''))
+            self.password.set(network_dict.get('password', ''))
+            priority = network_dict.get('priority', 5)
+            self.priority.set(str(priority))
+    
+    def validate(self):
+        ssid = self.ssid.get().strip()
+        password = self.password.get().strip()
+        # If password is filled but SSID is empty, that's invalid
+        if password and not ssid:
+            self.ssid.configure(fg='red')
+            return False
+        # SSID only (no password) is valid (open network)
+        self.ssid.configure(fg='black')
+        return True
+
+#--------------------------------------------------------------------------------------
+# Grid of WiFi Network Entries - Dynamically add/remove WiFi network rows
+#--------------------------------------------------------------------------------------
+
+class grid_of_wifi_networks(Tk.Frame):
+    def __init__(self, parent_frame, **kwargs):
+        super().__init__(parent_frame)
+        self.list_of_subframes = []
+        self.list_of_widgets = []
+        self.list_of_buttons = []
+        self.values_to_set = []
+
+    def create_row(self, pack_after=None):
+        # Create frame for this row
+        row_frame = Tk.Frame(self)
+        row_frame.pack(after=pack_after, fill='x', pady=(0, 4))
+        self.list_of_subframes.append(row_frame)
+        # Create the wifi network entry widget
+        widget = wifi_network_entry(row_frame)
+        widget.pack(side=Tk.LEFT, fill='x', expand=True)
+        self.list_of_widgets.append(widget)
+        # Set initial value if available
+        if len(self.list_of_widgets) <= len(self.values_to_set):
+            params_to_pass = self.values_to_set[len(self.list_of_widgets) - 1]
+            widget.set_value(params_to_pass)
+        # Create the "+" button for inserting rows
+        add_button = Tk.Button(row_frame, text="+", height=1, width=2, padx=2, pady=0,
+                               font=('Courier', 8, "normal"), 
+                               command=lambda: self.create_row(pack_after=row_frame))
+        add_button.pack(side=Tk.LEFT, padx=(10, 2))
+        self.list_of_buttons.append(add_button)
+        CreateToolTip(add_button, "Add new WiFi network (below)")
+        # Create the "-" button for deleting rows (except first row)
+        if len(self.list_of_subframes) > 1:
+            remove_button = Tk.Button(row_frame, text="-", height=1, width=2, padx=2, pady=0,
+                    font=('Courier', 8, "normal"),command=lambda: self.delete_row(row_frame))
+            remove_button.pack(side=Tk.LEFT, padx=2)
+            self.list_of_buttons.append(remove_button)
+            CreateToolTip(remove_button, "Delete this WiFi network")
+
+    def delete_row(self, row_frame):
+        if len(self.list_of_subframes) > 1:  # Always keep at least one row
+            row_frame.destroy()
+
+    def set_values(self, values_to_set: list):
+        # Destroy existing subframes
+        for subframe in self.list_of_subframes:
+            if subframe.winfo_exists():
+                subframe.destroy()
+        # Reset lists
+        self.list_of_subframes = []
+        self.list_of_widgets = []
+        self.list_of_buttons = []
+        self.values_to_set = values_to_set
+        # Create at least one row, or enough rows for all values
+        while len(self.list_of_widgets) < len(values_to_set) or len(self.list_of_subframes) == 0:
+            self.create_row()
+
+    def get_values(self):
+        self.validate()
+        networks = []
+        for widget in self.list_of_widgets:
+            if widget.winfo_exists():
+                value = widget.get_value()
+                # Only include non-empty SSIDs
+                if value['ssid'].strip():
+                    networks.append(value)
+        # Sort by priority descending (highest first)
+        networks.sort(key=lambda x: x['priority'], reverse=True)
+        return networks
+
+    def validate(self):
+        valid = True
+        for widget in self.list_of_widgets:
+            if widget.winfo_exists():
+                if not widget.validate():
+                    valid = False
+        return valid
+
+#-----------------------------------------------------------------------------
 # Camera Configuration Window - Non-modal Toplevel editor for ESPHome camera YAML.
 #   - Single instance window with open_or_focus()
 #   - Main app remains usable while this window is open
 #   - Launches esphome run in background thread
 #   - Streams CLI output to Tk text log via queue
-# -----------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 
 class CameraConfigUtility(Tk.Toplevel):
-    _instance = None
-    _NO_PORTS_SENTINEL = "No ports detected"
+    instance = None
+    NO_PORTS_SENTINEL = "No ports detected"
 
     @classmethod
     def open_or_focus(cls, parent):
         # Enforce a single window instance:
         # if already open, bring it to the front and focus.
-        if cls._instance is not None and cls._instance.winfo_exists():
-            w = cls._instance
+        if cls.instance is not None and cls.instance.winfo_exists():
+            w = cls.instance
             w.deiconify()
             w.lift()
             w.focus_force()
             return w
-        cls._instance = cls(parent)
-        return cls._instance
+        cls.instance = cls(parent)
+        return cls.instance
 
     def __init__(self, parent):
         super().__init__(parent)
         # Window setup:
         # - Non-modal (no grab_set), so main app remains interactive.
         # - transient(parent) keeps window related to parent in window manager.
-        self.title("ESPHome Camera Configuration")
+        self.title("Camera Configuration")
         self.resizable(False, False)
         self.transient(parent)
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
         # Load packaged default template:
         # Expected path: video_throttle/resources/esphome_template.yaml
         resource_path = resources.files('video_throttle').joinpath('resources', 'esphome_template.yaml')
@@ -186,76 +353,101 @@ class CameraConfigUtility(Tk.Toplevel):
             template_data = yaml.safe_load(f) or {}
         self.yaml = ESPHomeYaml(template_data)
         # Track a temporary file used when flashing an unsaved config.
-        self._temp_flash_config_path = None
+        self.temp_flash_config_path = None
+        # Thread safety for process management
+        self.flash_process_lock = threading.Lock()
+        self.flash_process = None
+        # Unsaved changes tracking
+        self.unsaved_changes = False
+        # Graceful shutdown flag
+        self.shutdown_requested = False
         # Build root form container.
         self.entries = {}
         form_frame = Tk.Frame(self, padx=10, pady=10)
         form_frame.pack(fill=Tk.BOTH, expand=True)
-        # ---------------------------------------------------------
+        #---------------------------------------------------------
         # Configuration File group
-        # ---------------------------------------------------------
+        #---------------------------------------------------------
         file_group = Tk.LabelFrame(form_frame, text="Configuration File", padx=10, pady=8)
         file_group.pack(fill=Tk.X, pady=(0, 8))
-        Tk.Label(file_group, text="Current File:").grid(row=0, column=0, sticky="w", padx=(0, 10))
-        self.filename_var = Tk.StringVar(value="None")
-        Tk.Label(file_group, textvariable=self.filename_var, width=40, anchor="w").grid(row=0, column=1, columnspan=3, sticky="w")
         self.new_button = Tk.Button(file_group, text="New", width=10, command=self.new_file)
-        self.new_button.grid(row=1, column=0, pady=(8, 0))
+        self.new_button.grid(row=0, column=0, pady=(8, 0))
         self.load_button = Tk.Button(file_group, text="Load...", width=10, command=self.load_file)
-        self.load_button.grid(row=1, column=1, pady=(8, 0), padx=5)
+        self.load_button.grid(row=0, column=1, pady=(8, 0), padx=5)
         self.save_button = Tk.Button(file_group, text="Save...", width=10, command=lambda: self.save_file(save_as=False))
-        self.save_button.grid(row=1, column=2, pady=(8, 0), padx=5)
+        self.save_button.grid(row=0, column=2, pady=(8, 0), padx=5)
         self.save_as_button = Tk.Button(file_group, text="Save as...", width=14, command=lambda: self.save_file(save_as=True))
-        self.save_as_button.grid(row=1, column=3, pady=(8, 0), padx=(5, 0))
-        # ---------------------------------------------------------
-        # WiFi + Device Metadata row (side-by-side)
-        # ---------------------------------------------------------
-        top_settings_row = Tk.Frame(form_frame)
-        top_settings_row.pack(fill=Tk.X, pady=(0, 10))
-        # WiFi group (left)
-        wifi_group = Tk.LabelFrame(top_settings_row, text="WiFi Settings", padx=10, pady=10)
-        wifi_group.pack(side=Tk.LEFT, fill=Tk.BOTH, expand=True, padx=(0, 5))
-        wifi_fields = [
-            ("SSID:", string_entry_box, "ssid", {"max_length": 32, "tooltip": "Wireless network name."}),
-            ("Password:", string_entry_box, "password", {"max_length": 64, "tooltip": "Wireless password."}),]
-        self.render_fields(wifi_group, wifi_fields, field_width=18)
-        # Device metadata group (right)
-        metadata_group = Tk.LabelFrame(top_settings_row, text="Device Metadata", padx=10, pady=10)
-        metadata_group.pack(side=Tk.LEFT, fill=Tk.BOTH, expand=True, padx=(5, 0))
-        metadata_fields = [
-            ("Device Name:", string_entry_box, "device_name", {"max_length": 10, "tooltip": "Device identifier (lowercase, no spaces, max 10 characters)"}),
-            ("Friendly Name:", string_entry_box, "friendly_name", {"max_length": 50, "tooltip": "Human-readable name"}),]
-        self.render_fields(metadata_group, metadata_fields, field_width=18)
-        # ---------------------------------------------------------
-        # Camera settings group
-        # ---------------------------------------------------------
+        self.save_as_button.grid(row=0, column=3, pady=(8, 0), padx=(5, 0))
+        #---------------------------------------------------------
+        # WiFi Networks Group
+        #---------------------------------------------------------
+        wifi_group = Tk.LabelFrame(form_frame, text="WiFi Networks", padx=10, pady=10)
+        wifi_group.pack(fill=Tk.BOTH, expand=True, padx=(0, 5))
+        # Use the new grid_of_wifi_networks widget
+        self.wifi_networks_grid = grid_of_wifi_networks(wifi_group)
+        self.wifi_networks_grid.pack(fill=Tk.BOTH, expand=True)
+        #---------------------------------------------------------
+        # Camera settings group - LEFT HAND SIDE
+        #---------------------------------------------------------
         camera_group = Tk.LabelFrame(form_frame, text="Camera Settings", padx=10, pady=10)
         camera_group.pack(fill=Tk.X)
+        # Configure grid for left/right layout
+        camera_group.columnconfigure(0, weight=0)  # labels (left)
+        camera_group.columnconfigure(1, weight=0)  # dropdowns (left)
+        camera_group.columnconfigure(2, weight=1)  # spacer
+        camera_group.columnconfigure(3, weight=0)  # labels (right)
+        camera_group.columnconfigure(4, weight=1)  # entries (right)
+        # Define the UI Elements we need
         RESOLUTION_OPTIONS = ["1600x1200", "1280x1024", "1024x768", "800x600", "640x480", "400x296", "320x240", "240x176", "160x120"]
         FRAME_RATE_OPTIONS = ["1", "5", "10", "15", "20", "25", "30", "60"]
         JPEG_QUALITY_OPTIONS = [str(i) for i in range(10, 64, 5)]
         FRAME_BUFFER_OPTIONS = ["1", "2", "3", "4"]
+        BRIGHTNESS_OPTIONS = ["-2", "-1", "0", "1", "2"]
+        CONTRAST_OPTIONS = ["-2", "-1", "0", "1", "2"]
         camera_fields = [
             ("Resolution:", dropdown_box, "resolution", {"values": RESOLUTION_OPTIONS, "tooltip": "Frame resolution (UXGA down to QQVGA)"}),
             ("Frame Rate:", dropdown_box, "frame_rate", {"values": FRAME_RATE_OPTIONS, "tooltip": "Maximum camera frame rate (fps)"}),
             ("JPEG Quality:", dropdown_box, "jpeg_quality", {"values": JPEG_QUALITY_OPTIONS, "tooltip": "JPEG quality (10 is best quality, 63 is lowest)"}),
-            ("Frame Buffers:", dropdown_box, "frame_buffers", {"values": FRAME_BUFFER_OPTIONS, "tooltip": "Number of camera frame buffers in PSRAM"}),]
-        self.render_fields(camera_group, camera_fields, field_width=10)
-        # Reserve and center right-side area for checkboxes
-        camera_group.columnconfigure(0, weight=0)  # labels
-        camera_group.columnconfigure(1, weight=0)  # dropdowns
-        camera_group.columnconfigure(2, weight=1)  # spacer
-        camera_group.columnconfigure(3, weight=1)  # checkbox area left
-        camera_group.columnconfigure(4, weight=1)  # checkbox area right
+            ("Frame Buffers:", dropdown_box, "frame_buffers", {"values": FRAME_BUFFER_OPTIONS, "tooltip": "Number of camera frame buffers in PSRAM"}),
+            ("Brightness:", dropdown_box, "brightness", {"values": BRIGHTNESS_OPTIONS, "tooltip": "Camera brightness adjustment (-2 to +2)"}),
+            ("Contrast:", dropdown_box, "contrast", {"values": CONTRAST_OPTIONS, "tooltip": "Camera contrast adjustment (-2 to +2)"})]
+        # Render camera fields (left side)
+        for row, (label_text, widget_class, key, extra_args) in enumerate(camera_fields):
+            Tk.Label(camera_group, text=label_text, anchor="w").grid(row=row, column=0, sticky="ew", padx=(0, 10), pady=4)
+            width = 10  # field_width for dropdowns
+            callback = extra_args.pop("callback", None)
+            if callback is None:callback = self.mark_unsaved_changes
+            widget = widget_class(camera_group, width=width, **extra_args)
+            # Bind change event to callback for dropdown_box (ttk.Combobox)
+            if widget_class == dropdown_box: widget.bind("<<ComboboxSelected>>", lambda e: callback())
+            widget.grid(row=row, column=1, sticky="w", pady=4)
+            self.entries[key] = widget
+        #---------------------------------------------------------
+        # Camera settings group - RIGHT HAND SIDE
+        #---------------------------------------------------------
+        # Device Metadata fields (right side, rows 0-1)
+        Tk.Label(camera_group, text="Device Name:").grid(row=0, column=3, sticky="w", padx=(20, 10), pady=4)
+        device_name_widget = string_entry_box(camera_group, width=18, max_length=10, 
+                                               tooltip="Device identifier (lowercase, no spaces, max 10 characters)",
+                                               callback=self.mark_unsaved_changes)
+        device_name_widget.grid(row=0, column=4, sticky="ew", padx=(0, 10), pady=4)
+        self.entries["device_name"] = device_name_widget
+        Tk.Label(camera_group, text="Friendly Name:").grid(row=1, column=3, sticky="w", padx=(20, 10), pady=4)
+        friendly_name_widget = string_entry_box(camera_group, width=18, max_length=50,
+                                                 tooltip="Human-readable name",
+                                                 callback=self.mark_unsaved_changes)
+        friendly_name_widget.grid(row=1, column=4, sticky="ew", padx=(0, 10), pady=4)
+        self.entries["friendly_name"] = friendly_name_widget
+        # Checkboxes (right side, rows 2-3)
         self.vflip = check_box(camera_group, width=20, label="Vertical Flip", tooltip="Flip image vertically.")
-        self.vflip.grid(row=1, column=3, columnspan=2, sticky="n", padx=(20, 10), pady=(0, 4))
+        self.vflip.grid(row=2, column=3, columnspan=2, sticky="w", padx=(20, 10), pady=(8, 4))
         self.entries["vertical_flip"] = self.vflip
         self.hmirror = check_box(camera_group, width=20, label="Horizontal Mirror", tooltip="Mirror image horizontally.")
-        self.hmirror.grid(row=2, column=3, columnspan=2, sticky="n", padx=(20, 10), pady=(4, 0))
+        self.hmirror.grid(row=3, column=3, columnspan=2, sticky="w", padx=(20, 10), pady=(4, 0))
         self.entries["horizontal_mirror"] = self.hmirror
-        # ---------------------------------------------------------
+        #---------------------------------------------------------
         # Flash/build + log group
-        # ---------------------------------------------------------
+        #---------------------------------------------------------
         flash_group = Tk.LabelFrame(form_frame, text="Flash / Build", padx=10, pady=10)
         flash_group.pack(fill=Tk.Y, pady=(10, 0), expand=True)
         flash_group.rowconfigure(1, weight=1)
@@ -289,81 +481,97 @@ class CameraConfigUtility(Tk.Toplevel):
         log_container.columnconfigure(0, weight=1)
         flash_group.rowconfigure(1, weight=1)
         self.log_text.insert(Tk.END, "Logs will appear here...\n")
+        # FIXED: Add circular log buffer to prevent memory bloat
+        self.max_log_lines = 1000  # Keep last 1000 lines
+        self.log_line_count = 1
         # Thread/process/log queue coordination state.
-        self._flash_thread = None
-        self._flash_proc = None
-        self._log_queue = queue.Queue()
-        self._log_poller_running = False
+        self.flash_thread = None
+        self.log_queue = queue.Queue()
+        self.log_poller_running = False
         # Initialize UI from template and detect connected ports now.
-        self.update_ui()
+        self.populate_ui()
         self.detect_ports()
 
-    def _on_close(self):
-        # If flashing is active, confirm before closing.
-        # All dialogs are parented to this window to keep them above this Toplevel.
-        if self._flash_proc is not None:
+    #----------------------------------------------------------------------------------
+    # Function called on window close event to tidy things up gracefully
+    #----------------------------------------------------------------------------------
+    
+    def on_close(self):
+        # Check for unsaved changes before closing
+        if self.unsaved_changes:
+            result = messagebox.askyesno("Unsaved Changes", 
+                "You have unsaved changes. Are you sure you want to exit?", 
+                parent=self)
+            if not result:
+                return
+        # Only warn if flashing is ACTUALLY in progress (not just finished)
+        with self.flash_process_lock:
+            flash_in_progress = self.flash_process is not None
+        if flash_in_progress:
             if not messagebox.askyesno("Flash in progress", "Flashing/build is in progress. Close this window anyway?", parent=self):
                 return
             self.abort_flash()
-        self._cleanup_temp_flash_file()
-        CameraConfigUtility._instance = None
+        # Signal shutdown to log poller thread
+        self.shutdown_requested = True
+        self.cleanup_temp_flash_file()
+        CameraConfigUtility.instance = None
         self.destroy()
+        
+    #----------------------------------------------------------------------------------
+    # Function called on config changes - to set the flag for unsaved changes
+    #----------------------------------------------------------------------------------
+        
+    def mark_unsaved_changes(self):
+        # FMark configuration as modified
+        self.unsaved_changes = True
 
-    def render_fields(self, container, fields, field_width=None):
-        # Shared dynamic field renderer for text/dropdown rows.
-        container.columnconfigure(1, weight=1)
-        for row, (label_text, widget_class, key, extra_args) in enumerate(fields):
-            Tk.Label(container, text=label_text, anchor="w").grid(row=row, column=0, sticky="ew", padx=(0, 10), pady=4)
-
-            if field_width is not None:
-                width = field_width
-            else:
-                width = 30 if widget_class == string_entry_box else 8
-
-            widget = widget_class(container, width=width, **extra_args)
-            widget.grid(row=row, column=1, sticky="w", pady=4)
-            self.entries[key] = widget
+    #----------------------------------------------------------------------------------
+    # Function to populate the UI with the values loaded from the template/file
+    #----------------------------------------------------------------------------------
             
-    def _is_widget_valid(self, widget):
-        # Preferred path: widget supplies explicit is_valid().
-        if hasattr(widget, "is_valid") and callable(widget.is_valid):
-            try:
-                return bool(widget.is_valid())
-            except Exception:
-                return False
-        # Compatibility path: trigger widget internal update hook.
-        if hasattr(widget, "entry_box_updated") and callable(widget.entry_box_updated):
-            try:
-                widget.entry_box_updated()
-            except Exception:
-                pass
-        # Legacy fallback: red foreground means invalid.
-        if hasattr(widget, "cget"):
-            try:
-                return widget.cget("fg") != "red"
-            except Exception:
-                return True
-        return True
-
-    def update_ui(self):
-        # Push model values -> UI controls.
-        self.entries["ssid"].set(self.yaml.ssid)
-        self.entries["password"].set(self.yaml.password)
-        self.entries["resolution"].set(self.yaml.resolution)
-        self.entries["frame_rate"].set(self.yaml.frame_rate)
-        self.entries["jpeg_quality"].set(self.yaml.jpeg_quality)
-        self.entries["frame_buffers"].set(self.yaml.frame_buffers)
-        self.entries["vertical_flip"].set(self.yaml.vertical_flip)
-        self.entries["horizontal_mirror"].set(self.yaml.horizontal_mirror)
+    def populate_ui(self):
+        # Populate WiFi networks grid
+        wifi_networks = self.yaml.wifi_networks
+        self.wifi_networks_grid.set_values(wifi_networks)
+        # Update device metadata
         self.entries["device_name"].set(self.yaml.device_name)
         self.entries["friendly_name"].set(self.yaml.friendly_name)
-        self.filename_var.set(os.path.basename(self.yaml.filename) if self.yaml.filename else "None")
+        # Update camera settings
+        self.entries["resolution"].set(self.yaml.resolution)
+        self.entries["frame_rate"].set(str(self.yaml.frame_rate))
+        self.entries["jpeg_quality"].set(str(self.yaml.jpeg_quality))
+        self.entries["frame_buffers"].set(str(self.yaml.frame_buffers))
+        self.entries["vertical_flip"].set(self.yaml.vertical_flip)
+        self.entries["horizontal_mirror"].set(self.yaml.horizontal_mirror)
+        self.entries["brightness"].set(str(self.yaml.brightness))
+        self.entries["contrast"].set(str(self.yaml.contrast))
+        # Update window title to show filename
+        if self.yaml.filename:
+            filename = os.path.basename(self.yaml.filename)
+            self.title(f"Camera Configuration - {filename}")
+        else:
+            self.title("Camera Configuration")
+
+    #----------------------------------------------------------------------------------
+    # Function to populate theinternal yaml model with the current UI settings
+    #----------------------------------------------------------------------------------
 
     def update_yaml(self):
-        # Push UI control values -> model.
-        self.yaml.ssid = self.entries["ssid"].get()
-        self.yaml.password = self.entries["password"].get()
+        # Collect WiFi networks from grid
+        self.yaml.wifi_networks = self.wifi_networks_grid.get_values()
+        # Update device metadata
+        self.yaml.device_name = self.entries["device_name"].get()
+        self.yaml.friendly_name = self.entries["friendly_name"].get()
+        # Update camera settings
         self.yaml.resolution = self.entries["resolution"].get()
+        try:
+            self.yaml.brightness = int(self.entries["brightness"].get())
+        except Exception:
+            self.yaml.brightness = 0
+        try:
+            self.yaml.contrast = int(self.entries["contrast"].get())
+        except Exception:
+            self.yaml.contrast = 0
         try:
             self.yaml.frame_rate = int(self.entries["frame_rate"].get())
         except Exception:
@@ -377,25 +585,52 @@ class CameraConfigUtility(Tk.Toplevel):
         except Exception:
             self.yaml.frame_buffers = 1
         self.yaml.vertical_flip = bool(self.entries["vertical_flip"].get())
-        self.yaml.device_name = self.entries["device_name"].get()
-        self.yaml.friendly_name = self.entries["friendly_name"].get()
         self.yaml.horizontal_mirror = bool(self.entries["horizontal_mirror"].get())
 
+    #----------------------------------------------------------------------------------
+    # Function to set the default yaml configuration and load into the UI 
+    #----------------------------------------------------------------------------------
+
     def new_file(self):
+        # Check for unsaved changes before creating new
+        if self.unsaved_changes:
+            result = messagebox.askyesno("Unsaved Changes", 
+                "You have unsaved changes. Are you sure you want to create a new configuration?", 
+                parent=self)
+            if not result:
+                return
         # Reset to template defaults.
         self.yaml.new()
-        self.update_ui()
+        self.unsaved_changes = False
+        self.populate_ui()
+
+    #----------------------------------------------------------------------------------
+    # Function to set load a previously created yaml file 
+    #----------------------------------------------------------------------------------
 
     def load_file(self):
+        # Check for unsaved changes before loading
+        if self.unsaved_changes:
+            result = messagebox.askyesno("Unsaved Changes", 
+                "You have unsaved changes. Are you sure you want to load a different configuration?", 
+                parent=self)
+            if not result:
+                return
         # Open file chooser parented to this window to avoid z-order issues.
-        filename = filedialog.askopenfilename(parent=self, title="Load ESPHome Configuration", filetypes=[("ESPHome YAML Files", "*.yaml"), ("YAML Files", "*.yml"), ("All Files", "*.*")])
+        filename = filedialog.askopenfilename(parent=self, title="Load ESPHome Configuration",
+                filetypes=[("ESPHome YAML Files", "*.yaml"), ("YAML Files", "*.yml"), ("All Files", "*.*")])
         if not filename:
             return
         try:
             self.yaml.load(filename)
-            self.update_ui()
+            self.unsaved_changes = False
+            self.populate_ui()
         except Exception as ex:
             messagebox.showerror("Load Failed", str(ex), parent=self)
+
+    #----------------------------------------------------------------------------------
+    # Function to create/save the yaml configuration file file 
+    #----------------------------------------------------------------------------------
 
     def save_file(self, save_as: bool = False):
         # Validate before save.
@@ -405,7 +640,8 @@ class CameraConfigUtility(Tk.Toplevel):
         self.update_yaml()
         # Resolve target filename.
         if save_as or self.yaml.filename is None or self.yaml.filename == "None":
-            filename = filedialog.asksaveasfilename(parent=self, title="Save ESPHome Configuration", defaultextension=".yaml", filetypes=[("ESPHome YAML Files", "*.yaml"), ("YAML Files", "*.yml"), ("All Files", "*.*")])
+            filename = filedialog.asksaveasfilename(parent=self, title="Save ESPHome Configuration", defaultextension=".yaml",
+                                    filetypes=[("ESPHome YAML Files", "*.yaml"), ("YAML Files", "*.yml"), ("All Files", "*.*")])
             if not filename:
                 return
         else:
@@ -413,44 +649,73 @@ class CameraConfigUtility(Tk.Toplevel):
         # Save without success popup (requested behavior).
         try:
             self.yaml.save(filename)
-            self.update_ui()
+            self.unsaved_changes = False
+            self.populate_ui()
         except Exception as ex:
             messagebox.showerror("Save Failed", str(ex), parent=self)
 
+    #----------------------------------------------------------------------------------
+    # Function to validate all user inputs prior to flashing or saving
+    #----------------------------------------------------------------------------------
+    
     def validate(self):
-        # Validate all known entry widgets.
+        # Validate WiFi networks grid
+        if not self.wifi_networks_grid.validate():
+            return False
+        # Validate other fields
         for widget in self.entries.values():
-            if not self._is_widget_valid(widget):
-                return False
+            # Preferred path: widget supplies explicit is_valid().
+            if hasattr(widget, "is_valid") and callable(widget.is_valid):
+                try:
+                    if not bool(widget.is_valid):
+                        return False
+                except Exception:
+                    return False
+            # Compatibility path: trigger widget internal update hook.
+            elif hasattr(widget, "validate") and callable(widget.validate):
+                try:
+                    if not widget.validate():
+                        return False
+                except Exception:
+                    pass
+            # Legacy fallback: red foreground means invalid.
+            elif hasattr(widget, "cget"):
+                try:
+                    if widget.cget("fg") == "red":
+                        return False
+                except Exception:
+                    pass
         return True
+    
+    #----------------------------------------------------------------------------------
+    # Function to Detect USB ports that are potentially connected to a camera
+    #----------------------------------------------------------------------------------
 
     def detect_ports(self):
-        #---------------------------------------------------------
-        # Function to determine if a port 'looks like' a USB port
-        #---------------------------------------------------------
-        def _looks_like_usb_serial(port_info):
+        # Enumerate currently connected serial ports and fill combobox.
+        active_ports = serial.tools.list_ports.comports()
+        # Filter for USB serial ports
+        port_list = []
+        for port in active_ports:
+            if not getattr(port, "device", None):
+                continue
             # Prefer explicit USB metadata when available
-            if getattr(port_info, "vid", None) is not None or getattr(port_info, "pid", None) is not None:
-                return True
+            if getattr(port, "vid", None) is not None or getattr(port, "pid", None) is not None:
+                port_list.append(port.device)
+                continue
             # Fallback heuristics by platform naming/description/hwid
-            dev = (getattr(port_info, "device", "") or "").lower()
-            desc = (getattr(port_info, "description", "") or "").lower()
-            hwid = (getattr(port_info, "hwid", "") or "").lower()
+            dev = (getattr(port, "device", "") or "").lower()
+            desc = (getattr(port, "description", "") or "").lower()
+            hwid = (getattr(port, "hwid", "") or "").lower()
             usb_name_hits = ("ttyusb", "ttyacm", "cu.usb", "usbserial")
             usb_text_hits = ("usb", "cp210", "ch340", "ftdi", "silicon labs", "arduino", "esp32", "esp8266")
             if any(tok in dev for tok in usb_name_hits):
-                return True
-            if any(tok in desc for tok in usb_text_hits):
-                return True
-            if "usb" in hwid:
-                return True
-            return False
-        #---------------------------------------------------------
-        # Main Class Method starts here
-        #---------------------------------------------------------
-        # Enumerate currently connected serial ports and fill combobox.
-        active_ports = serial.tools.list_ports.comports()
-        port_list = [port.device for port in active_ports if getattr(port, "device", None) and _looks_like_usb_serial(port)]        
+                port_list.append(port.device)
+            elif any(tok in desc for tok in usb_text_hits):
+                port_list.append(port.device)
+            elif "usb" in hwid:
+                port_list.append(port.device)
+        # Populate combobox with filtered ports
         if port_list:
             self.device_combobox["values"] = port_list
             # Pick a practical default:
@@ -463,16 +728,25 @@ class CameraConfigUtility(Tk.Toplevel):
             self.device_combobox.set(default_port)
         else:
             self.device_combobox["values"] = []
-            self.device_combobox.set(self._NO_PORTS_SENTINEL)
+            self.device_combobox.set(self.NO_PORTS_SENTINEL)
+            
+            
+    #----------------------------------------------------------------------------------
+    # Function to delete the temporary flash file
+    #----------------------------------------------------------------------------------
 
-    def _cleanup_temp_flash_file(self):
+    def cleanup_temp_flash_file(self):
         # Remove temp config file created for unsaved flash runs.
-        if self._temp_flash_config_path and os.path.exists(self._temp_flash_config_path):
+        if self.temp_flash_config_path and os.path.exists(self.temp_flash_config_path):
             try:
-                os.remove(self._temp_flash_config_path)
+                os.remove(self.temp_flash_config_path)
             except Exception:
                 pass
-        self._temp_flash_config_path = None
+        self.temp_flash_config_path = None
+
+    #----------------------------------------------------------------------------------
+    # Function to flash the camera firmware (with the current settings)
+    #----------------------------------------------------------------------------------
 
     def flash_device(self):
         # Validate + sync UI->model first.
@@ -487,14 +761,14 @@ class CameraConfigUtility(Tk.Toplevel):
             try:
                 self.yaml.save(tempname)
             except Exception as ex:
-                self._cleanup_temp_flash_file()
+                self.cleanup_temp_flash_file()
                 messagebox.showerror("Save Failed", str(ex), parent=self)
                 return
             config_path = tempname
-            self._temp_flash_config_path = tempname
+            self.temp_flash_config_path = tempname
         else:
             config_path = self.yaml.filename
-            self._temp_flash_config_path = None
+            self.temp_flash_config_path = None
             try:
                 self.yaml.save(config_path)
             except Exception as ex:
@@ -502,12 +776,12 @@ class CameraConfigUtility(Tk.Toplevel):
                 return
         # Resolve device selection.
         device = self.device_combobox.get().strip()
-        if device == self._NO_PORTS_SENTINEL:
+        if device == self.NO_PORTS_SENTINEL:
             device = ""
         if device == "":
             resp = messagebox.askyesno("No device specified", "No device port specified. Run 'esphome run' and choose device interactively?", parent=self)
             if not resp:
-                self._cleanup_temp_flash_file()
+                self.cleanup_temp_flash_file()
                 return
         # Build command.
         cmd = ["esphome", "run", config_path]
@@ -518,70 +792,119 @@ class CameraConfigUtility(Tk.Toplevel):
         self.log_text.insert(Tk.END, f"Running: {' '.join(cmd)}\n\n")
         self.flash_button.config(state="disabled")
         self.abort_button.config(state="normal")
-        self._log_queue = queue.Queue()
-        self._flash_thread = threading.Thread(target=self._run_subprocess, args=(cmd,), daemon=True)
-        self._flash_thread.start()
+        self.log_queue = queue.Queue()
+        self.flash_thread = threading.Thread(target=self.thread_to_run_process, args=(cmd,), daemon=True)
+        self.flash_thread.start()
         # Start log poller once.
-        if not self._log_poller_running:
-            self._log_poller_running = True
-            self.after(100, self._poll_logs)
+        if not self.log_poller_running:
+            self.log_poller_running = True
+            self.after(100, self.poll_logs)
+
+    #----------------------------------------------------------------------------------
+    # Function to abort the flashing process cleanly
+    #----------------------------------------------------------------------------------
 
     def abort_flash(self):
-        # Request graceful stop first.
-        if self._flash_proc:
-            try:
-                self._log_queue.put("Abort requested. Sending terminate...\n")
-                self._flash_proc.terminate()
-            except Exception:
-                pass
+        # FIXED: Thread-safe process termination
+        with self.flash_process_lock:
+            if self.flash_process is not None:
+                try:
+                    self.log_queue.put("Abort requested. Sending terminate...\n")
+                    self.flash_process.terminate()
+                except Exception:
+                    pass
         self.abort_button.config(state="disabled")
 
-    def _run_subprocess(self, cmd):
+    #----------------------------------------------------------------------------------
+    # Thread to run the flashing process
+    #----------------------------------------------------------------------------------
+
+    def thread_to_run_process(self, cmd):
         # Runs in background thread - Does NOT call Tk APIs directly (communicates through queue)
         try:
             esphome_bin = shutil.which(cmd[0])
             if esphome_bin is None:
-                self._log_queue.put("esphome executable not found on PATH. Please install esphome CLI (pip install esphome).\n")
+                self.log_queue.put("esphome executable not found on PATH. Please install esphome CLI (pip install esphome).\n")
                 return
-            self._flash_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1, text=True)
-            for line in self._flash_proc.stdout:
-                self._log_queue.put(line)
-            self._flash_proc.wait(timeout=2)
-            ret = self._flash_proc.returncode
-            self._log_queue.put(f"\nProcess finished with return code {ret}\n")
+            # Thread-safe process creation
+            with self.flash_process_lock:
+                self.flash_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1, text=True)
+            proc = self.flash_process
+            for line in proc.stdout:
+                self.log_queue.put(line)
+            # Increased timeout from 2 seconds to 300 seconds (5 minutes) for ESPHome builds
+            proc.wait(timeout=300)
+            ret = proc.returncode
+            # Detect successful completion
+            if ret == 0:
+                self.log_queue.put(f"\n✓ Flashing completed successfully!\n")
+                self.log_queue.put("__SUCCESS__\n")
+            else:
+                self.log_queue.put(f"\n✗ Process finished with return code {ret}\n")
+                self.log_queue.put("__DONE__\n")
         except subprocess.TimeoutExpired:
             # If process ignores terminate, escalate to kill.
             try:
-                self._log_queue.put("Process did not terminate in time. Sending kill...\n")
-                self._flash_proc.kill()
-                self._flash_proc.wait(timeout=2)
-                self._log_queue.put("\nProcess killed.\n")
+                self.log_queue.put("Process did not terminate in time. Sending kill...\n")
+                with self.flash_process_lock:
+                    if self.flash_process is not None:
+                        self.flash_process.kill()
+                        self.flash_process.wait(timeout=5)
+                self.log_queue.put("\nProcess killed.\n")
             except Exception as ex:
-                self._log_queue.put(f"\nFailed to kill process cleanly: {ex}\n")
+                self.log_queue.put(f"\nFailed to kill process cleanly: {ex}\n")
+            self.log_queue.put("__DONE__\n")
         except Exception as ex:
-            self._log_queue.put(f"\nFlashing failed: {ex}\n")
+            self.log_queue.put(f"\nFlashing failed: {ex}\n")
+            self.log_queue.put("__DONE__\n")
         finally:
-            self._flash_proc = None
-            self._cleanup_temp_flash_file()
-            self._log_queue.put("__DONE__\n")
+            with self.flash_process_lock:
+                self.flash_process = None
+            self.cleanup_temp_flash_file()
 
-    def _poll_logs(self):
+    #----------------------------------------------------------------------------------
+    # Function to get the logs generated by the flashing thread and populate the UI
+    #----------------------------------------------------------------------------------
+
+    def poll_logs(self):
+        # Graceful shutdown check at start of loop
+        if self.shutdown_requested:
+            self.log_poller_running = False
+            return
         # Runs on Tk main thread - drains log queue, updates Text widget and finalizes button state when run is complete
         try:
             while True:
-                line = self._log_queue.get_nowait()
+                line = self.log_queue.get_nowait()
+                # Detect successful completion
+                if line == "__SUCCESS__\n":
+                    self.flash_button.config(state="normal")
+                    self.abort_button.config(state="disabled")
+                    self.log_poller_running = False
+                    with self.flash_process_lock:
+                        self.flash_process = None
+                    return
                 if line == "__DONE__\n":
                     self.flash_button.config(state="normal")
                     self.abort_button.config(state="disabled")
-                    self._log_poller_running = False
+                    self.log_poller_running = False
                     return
+                # Add line to log and maintain circular buffer
                 self.log_text.insert(Tk.END, line)
-                self.log_text.see(Tk.END)
+                self.log_line_count += 1
+                # If we exceed max lines, delete from top
+                if self.log_line_count > self.max_log_lines:
+                    self.log_text.delete("1.0", "2.0")  # Delete first line
+                    self.log_line_count -= 1
+                self.log_text.see(Tk.END)  # Auto-scroll to bottom
         except queue.Empty:
             pass
-        self.after(100, self._poll_logs)
-    
-###################################################################################################
+        # Re-check shutdown flag before rescheduling
+        if not self.shutdown_requested:
+            self.after(100, self.poll_logs)
+        else:
+            self.log_poller_running = False
+            
+#########################################################################################################################################
     
     
     

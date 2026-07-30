@@ -146,7 +146,9 @@ class ThrottleApplication(Tk.Tk):
                 "dcc_speed_scaling": 1.0,
                 "axle_offsets_ft": [],
                 "fwd_stream_url": "",
-                "rev_stream_url": ""
+                "rev_stream_url": "",
+                "stream_brightness": 0,
+                "stream_contrast": 1.0
             },
             "general_settings": {
                 "sound_enabled": True,

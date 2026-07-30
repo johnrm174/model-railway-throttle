@@ -195,6 +195,8 @@ class complex_throttle(Tk.LabelFrame):
         self.video_state_lock = threading.Lock()
         self.video_switch_lock = threading.Lock()
         self.last_video_switch_ts = 0.0
+        self.stream_brightness = 0
+        self.stream_contrast = 1.0
         # Locomotive Active State Placeholders
         self.loco_name = ""
         self.loco_mass = 0
@@ -364,12 +366,12 @@ class complex_throttle(Tk.LabelFrame):
     # Video connection/disconnection and update functions.
     #----------------------------------------------------------------------------------------------------
 
-    def _set_video_failed(self, message):
+    def set_video_failed(self, message):
         self.video_status = message
         self.video_running = False
 
-    def _fail_video_from_worker(self, message):
-        self.root_window.after(0, lambda: self._set_video_failed(message))
+    def fail_video_from_worker(self, message):
+        self.root_window.after(0, lambda: self.set_video_failed(message))
 
     def show_video_message(self, text, color="white"):
         self.video_screen.itemconfig(self.video_canvas_image_id, image="")
@@ -504,18 +506,31 @@ class complex_throttle(Tk.LabelFrame):
                     if not ret or frame is None:
                         fail_count += 1
                         if fail_count >= 3:
-                            self._fail_video_from_worker("Video stream lost")
+                            self.fail_video_from_worker("Video stream lost")
                             break
                         time.sleep(0.05)
                         continue
                     fail_count = 0
                     frame = cv2.resize(frame, (480, 270))
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    # Apply brightness and contrast adjustments
+                    # Convert to float for processing
+                    frame_float = frame.astype(numpy.float32) / 255.0
+                    # Apply contrast: output = contrast * (input - 0.5) + 0.5
+                    frame_float = self.stream_contrast * (frame_float - 0.5) + 0.5
+                    # Apply brightness: output = input + (brightness / 100)
+                    # Brightness range is -100 to +100, normalize to -1.0 to +1.0
+                    brightness_factor = self.stream_brightness / 100.0
+                    frame_float = frame_float + brightness_factor
+                    # Clamp values to valid range [0, 1]
+                    frame_float = numpy.clip(frame_float, 0.0, 1.0)
+                    # Convert back to uint8
+                    frame = (frame_float * 255).astype(numpy.uint8)
                     with self.video_lock:
                         self.latest_frame = frame
                 except Exception as e:
                     logging.warning(f"Video reader error: {e}")
-                    self._fail_video_from_worker("Video stream error")
+                    self.fail_video_from_worker("Video stream error")
                     break
         finally:
             # Reader thread owns final release of the capture it was given.
@@ -523,7 +538,7 @@ class complex_throttle(Tk.LabelFrame):
                 cap.release()
             except Exception:
                 pass
-
+            
     # ----------------------------------------------------------------------------------------------------
     # This is now a UI paint loop only (non-blocking)
     # ----------------------------------------------------------------------------------------------------
@@ -570,8 +585,8 @@ class complex_throttle(Tk.LabelFrame):
     #----------------------------------------------------------------------------------------------------
 
     def update_parameters(self, loco_name:str, dcc_address:int, loco_mass_tonnes:int, loco_max_speed_mph:int, max_tractive_effort_lbf:int, 
-                            traction_responsiveness:float, brake_responsiveness:float, dcc_speed_scaling:float, 
-                            axle_offsets_ft:list, fwd_stream_url:str, rev_stream_url:str, loco_horsepower:int):
+                        traction_responsiveness:float, brake_responsiveness:float, dcc_speed_scaling:float, axle_offsets_ft:list,
+                        fwd_stream_url:str, rev_stream_url:str, loco_horsepower:int, stream_brightness:int, stream_contrast:float):
         self.cleanup_video()
         # Cancel any existing physics loop
         if self.next_physics_loop_event:
@@ -592,6 +607,9 @@ class complex_throttle(Tk.LabelFrame):
         self.traction_responsiveness = traction_responsiveness
         self.brake_responsiveness = brake_responsiveness
         self.axle_offsets = axle_offsets_ft
+        # Store brightness and contrast settings
+        self.stream_brightness = int(stream_brightness)
+        self.stream_contrast = float(stream_contrast)
         # Update the video stream source
         self.fwd_stream_url = (fwd_stream_url or "").strip()
         self.rev_stream_url = (rev_stream_url or "").strip()

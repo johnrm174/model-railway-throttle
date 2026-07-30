@@ -16,12 +16,12 @@ from .widgets import ConfigControlBar
 
 class LocoConfigWindow(Tk.Toplevel):
     # Track singleton instance so only one non-modal config window can exist at a time.
-    _active_instance = None
+    active_instance = None
 
     @classmethod
     def open_or_focus(cls, parent, current_config, save_callback):
         # If window already exists, just raise and focus it.
-        existing = cls._active_instance
+        existing = cls.active_instance
         if existing is not None:
             try:
                 if existing.winfo_exists():
@@ -33,7 +33,7 @@ class LocoConfigWindow(Tk.Toplevel):
                 pass
         # Otherwise create a new one.
         window = cls(parent, current_config, save_callback)
-        cls._active_instance = window
+        cls.active_instance = window
         return window
 
     def __init__(self, parent, current_config, save_callback):
@@ -46,8 +46,14 @@ class LocoConfigWindow(Tk.Toplevel):
         self.initial_config = current_config
         self.entries = {}
         # Tracking dictionaries for discovered cameras
-        self.discovered_cameras = {
-            "None": "", "Manual URL Entry": ""}
+        self.discovered_cameras = {"None": "", "Manual URL Entry": ""}
+        # Add saved stream URLs to the discovered list
+        fwd_url = current_config.get("fwd_stream_url", "").strip()
+        rev_url = current_config.get("rev_stream_url", "").strip()
+        if fwd_url and fwd_url not in self.discovered_cameras.values():
+            self.discovered_cameras[f"[Saved] {fwd_url}"] = fwd_url
+        if rev_url and rev_url not in self.discovered_cameras.values():
+            self.discovered_cameras[f"[Saved] {rev_url}"] = rev_url
         self.scan_interval_ms = 1000
         self.scan_thread = None
         self.scan_in_progress = False
@@ -58,6 +64,7 @@ class LocoConfigWindow(Tk.Toplevel):
         self.preview_thread = None
         self.preview_generation = 0
         self.preview_token = 0
+        self.window_closing = False
         # Outer Layout Split Frame
         main_layout = Tk.Frame(self)
         main_layout.pack(fill=Tk.BOTH, expand=True)
@@ -96,13 +103,13 @@ class LocoConfigWindow(Tk.Toplevel):
              {"min_val": 0.001, "max_val": 1.0, "tooltip": "Power throttle engine spool-up delays (Typical: 0.01 - 0.1)"}),
             ("Brake Responsiveness:", float_entry_box, "brake_responsiveness",
              {"min_val": 0.001, "max_val": 1.0, "tooltip": "Air pressure drop responsiveness rate (Typical: 0.01 - 0.1)"}),
-            ("Axle Offsets (ft, comma separated):", axle_entry_box, "axle_offsets_ft",
+            ("Axle Offsets (ft):", axle_entry_box, "axle_offsets_ft",
              {"max_length": 100, "tooltip": "Axle positions from front of the locomotive (in feet) to synchronize track-clack clicks "+
                                             "(e.g. 0.0, 7.0, 14.0, 40.0, 47.0, 54.0 for a Class 47 Co-Co)"}),
             ("Forward Stream URL:", "fwd_combo", "fwd_stream_url",
              {"max_length": 255, "tooltip": "Forward facing cab camera IP address/port (e.g. http://192.168.1.149:8080)"}),
             ("Reverse Stream URL:", "rev_combo", "rev_stream_url",
-             {"max_length": 255, "tooltip": "Rear facing cab camera local IP address/port (e.g. http://192.168.1.150:8080)"})]
+             {"max_length": 255, "tooltip": "Rear facing cab camera local IP address/port (e.g. http://192.168.1.150:8080)"}),]
         # Render the input fields
         for row, (label_text, widget_class, key, extra_args) in enumerate(fields):
             Tk.Label(form_frame, text=label_text, anchor="w").grid(row=row, column=0, sticky="ew", pady=4, padx=(0, 10))
@@ -116,7 +123,7 @@ class LocoConfigWindow(Tk.Toplevel):
                 widget.set(val)  # Set raw string URL initially as a fallback
             else:
                 # Handle standard entry fields cleanly
-                width = 40 if widget_class in (string_entry_box, axle_entry_box) else 12
+                width = 45 if widget_class in (string_entry_box, axle_entry_box) else 12
                 widget = widget_class(form_frame, width=width, **extra_args)
                 widget.grid(row=row, column=1, sticky="w" if width == 12 else "ew", pady=4)
                 widget.set(val)
@@ -127,25 +134,40 @@ class LocoConfigWindow(Tk.Toplevel):
             on_reset=self.reset_to_original,
             on_cancel=self.close_window)
         control_bar.pack(fill=Tk.X, pady=10, side=Tk.BOTTOM)
+        # Stream adjustment sliders directly under the preview
+        slider_container = Tk.Frame(preview_frame)
+        slider_container.pack(fill=Tk.X)
+        Tk.Label(slider_container, text="Brightness:", anchor="w").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.stream_brightness_var = Tk.IntVar(value=int(current_config.get("stream_brightness", 0)))
+        self.stream_brightness_scale = Tk.Scale(slider_container, from_=-100, to=100, orient=Tk.HORIZONTAL,
+                                        resolution=1, showvalue=0, variable=self.stream_brightness_var, length=220)
+        self.stream_brightness_scale.grid(row=0, column=1, sticky="ew", pady=4)
+        self.entries["stream_brightness"] = self.stream_brightness_scale
+        Tk.Label(slider_container, text="Contrast:", anchor="w").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.stream_contrast_var = Tk.DoubleVar(value=float(current_config.get("stream_contrast", 1.0)))
+        self.stream_contrast_scale = Tk.Scale(slider_container, from_=0.5, to=2.0, orient=Tk.HORIZONTAL,
+                                        resolution=0.05, showvalue=0, variable=self.stream_contrast_var, length=220)
+        self.stream_contrast_scale.grid(row=1, column=1, sticky="ew", pady=4)
+        self.entries["stream_contrast"] = self.stream_contrast_scale
+        slider_container.columnconfigure(1, weight=1)        
         # Ensure comboboxes always have baseline options even before/without discovery.
         self.update_camera_dropdown_values()
-        self.entries["fwd_stream_url"].set("None")
-        self.entries["rev_stream_url"].set("None")
         # Start periodic discovery loop
-        self._schedule_discovery_tick()
+        self.schedule_discovery_tick()
         # Handle close cleanup to stop streaming threads safely
         self.protocol("WM_DELETE_WINDOW", self.close_window)
         
     # -------------------------------------------------------------------------
-    # Safely shut down everything on window close
+    # Safely shut down everything gracefully on window close
     # -------------------------------------------------------------------------
 
     def close_window(self):
+        self.window_closing = True
         self.stop_preview_stream()
         self.current_preview_url = ""
         # Stop the periodic network scan
         self.scan_in_progress = False
-        # 1. Break the loop inside stream_worker instantly
+        # ... rest of method ...        # 1. Break the loop inside stream_worker instantly
         self.preview_thread_running = False
         self.preview_generation += 1
         # 2. Reset tracking variables
@@ -158,8 +180,8 @@ class LocoConfigWindow(Tk.Toplevel):
         except Exception:
             pass # UI widgets might already be closing, pass safely
         # 4. Clear active-instance tracker
-        if LocoConfigWindow._active_instance is self:
-            LocoConfigWindow._active_instance = None
+        if LocoConfigWindow.active_instance is self:
+            LocoConfigWindow.active_instance = None
         # 5. Destroy the Toplevel window block completely
         self.destroy()
 
@@ -167,14 +189,14 @@ class LocoConfigWindow(Tk.Toplevel):
     # Network Scanning Logic
     # -------------------------------------------------------------------------
 
-    def _schedule_discovery_tick(self):
+    def schedule_discovery_tick(self):
         # Tk-thread scheduler: run every scan_interval_ms
-        if not self.winfo_exists():
+        if not self.winfo_exists() or self.window_closing:
             return
-        self._run_discovery_if_idle()
-        self.after(self.scan_interval_ms, self._schedule_discovery_tick)
-
-    def _run_discovery_if_idle(self):
+        self.run_discovery_if_idle()
+        self.after(self.scan_interval_ms, self.schedule_discovery_tick)
+        
+    def run_discovery_if_idle(self):
         # Don't start another scan if previous scan thread still running
         if self.scan_in_progress:
             return
@@ -208,8 +230,10 @@ class LocoConfigWindow(Tk.Toplevel):
 
         zeroconf = None
         try:
-            # Rebuild discovered map each scan, preserving baseline choices.
+            # Rebuild discovered map each scan, but preserve saved URLs
+            saved_urls = {k: v for k, v in self.discovered_cameras.items() if k.startswith("[Saved]")}
             self.discovered_cameras = {"None": "", "Manual URL Entry": ""}
+            self.discovered_cameras.update(saved_urls)  # Re-add saved URLs
             self.after(0, self.update_camera_dropdown_values)
             zeroconf = Zeroconf()
             listener = ESPHomeDiscovery(self.register_discovered_camera)
@@ -225,7 +249,8 @@ class LocoConfigWindow(Tk.Toplevel):
             self.scan_in_progress = False
     
     def register_discovered_camera(self, name, url):
-        display_label = f"{name} ({url})"
+        # Prefix discovered cameras with "DISCOVERED:"
+        display_label = f"DISCOVERED: {name} ({url})"
         self.discovered_cameras[display_label] = url
         # Safely update the combo selections inside the main Tkinter thread loop
         self.after(0, self.update_camera_dropdown_values)
@@ -235,20 +260,20 @@ class LocoConfigWindow(Tk.Toplevel):
         for key in ["fwd_stream_url", "rev_stream_url"]:
             combo = self.entries[key]
             current_val = combo.get().strip()
-            combo["values"] = options
-            # Preserve explicit baseline selections if chosen
-            if current_val in self.discovered_cameras:
-                combo.set(current_val)
-                continue
-            # Map saved raw URL -> discovered label when possible
-            mapped = False
-            for label, url in self.discovered_cameras.items():
-                if current_val and current_val == url:
-                    combo.set(label)
-                    mapped = True
-                    break
-            # If nothing selected yet, default to "None"
-            if not current_val and not mapped:
+            # Only update values if they've actually changed (prevents dropdown glitch)
+            current_options = list(combo["values"])
+            if set(current_options) != set(options):
+                combo["values"] = options
+            # Preserve the current selection
+            if current_val:
+                # If current value is a raw URL (not in discovered list), keep it
+                if current_val not in self.discovered_cameras:
+                    combo.set(current_val)
+                else:
+                    # It's a discovered label, use it
+                    combo.set(current_val)
+            else:
+                # Default to "None" if nothing is set
                 combo.set("None")
 
     # -------------------------------------------------------------------------
@@ -328,18 +353,27 @@ class LocoConfigWindow(Tk.Toplevel):
         except Exception: pass
         if cap is None or not cap.isOpened():
             self.after(0, lambda g=generation, t=token:
-                self._safe_preview_status("Unable to open stream", "red", g, t))
+                self.safe_preview_status("Unable to open stream", "red", g, t))
             try: cap.release()
             except Exception: pass
             return
         while self.preview_thread_running and generation == self.preview_generation and url == self.current_preview_url:
+            try:
+                brightness = float(self.stream_brightness_var.get())
+            except Exception:
+                brightness = 0.0
+            try:
+                contrast = float(self.stream_contrast_var.get())
+            except Exception:
+                contrast = 1.0
             ret, frame = cap.read()
             if not ret:
                 self.after(0, lambda g=generation, t=token:
-                    self._safe_preview_status("Stream disconnected or unavailable", "red", g, t))
+                    self.safe_preview_status("Stream disconnected or unavailable", "red", g, t))
                 break
             self.after(0, lambda g=generation, t=token:
-                self._safe_preview_status("Streaming Active", "green", g, t))
+                self.safe_preview_status("Streaming Active", "green", g, t))
+            frame = cv2.convertScaleAbs(frame, alpha=contrast, beta=brightness)
             frame = cv2.resize(frame, (320, 240))
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             img_tk = ImageTk.PhotoImage(image=Image.fromarray(frame))
@@ -348,7 +382,7 @@ class LocoConfigWindow(Tk.Toplevel):
             time.sleep(0.05)
         cap.release()
 
-    def _safe_preview_status(self, text, color, generation, token):
+    def safe_preview_status(self, text, color, generation, token):
         if token != self.preview_token: return
         if generation != self.preview_generation: return
         if hasattr(self, "status_label") and self.status_label.winfo_exists():
@@ -404,6 +438,8 @@ class LocoConfigWindow(Tk.Toplevel):
             "traction_responsiveness": self.entries["traction_responsiveness"].get(),
             "brake_responsiveness": self.entries["brake_responsiveness"].get(),
             "axle_offsets_ft": self.entries["axle_offsets_ft"].get(),
+            "stream_brightness": int(self.stream_brightness_var.get()),
+            "stream_contrast": float(self.stream_contrast_var.get()),
             "fwd_stream_url": fwd_url,
             "rev_stream_url": rev_url}
         # Disconnect preview stream before saving, so main app can take the feed immediately.
@@ -422,10 +458,19 @@ class LocoConfigWindow(Tk.Toplevel):
     def reset_to_original(self):
         for key, widget in self.entries.items():
             original_val = self.initial_config.get(key, "")
-            widget.set(original_val)
-            if hasattr(widget, 'validate'):
-                widget.validate()
-            elif hasattr(widget, 'entry_box_updated'):
-                widget.entry_box_updated()
-
+            if key == "stream_brightness":
+                self.stream_brightness_var.set(int(original_val if original_val != "" else 0))
+            elif key == "stream_contrast":
+                self.stream_contrast_var.set(float(original_val if original_val != "" else 1.0))
+            elif key in ("fwd_stream_url", "rev_stream_url"):
+                # For stream URLs, restore the raw URL value
+                combo = widget
+                combo.set(original_val if original_val else "None")
+            else:
+                widget.set(original_val)
+                if hasattr(widget, 'validate'):
+                    widget.validate()
+                elif hasattr(widget, 'entry_box_updated'):
+                    widget.entry_box_updated()
+                    
 ###############################################################################################
