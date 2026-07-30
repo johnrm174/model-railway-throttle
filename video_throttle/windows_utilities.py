@@ -357,6 +357,8 @@ class CameraConfigUtility(Tk.Toplevel):
         # Thread safety for process management
         self.flash_process_lock = threading.Lock()
         self.flash_process = None
+        self.flash_in_progress = False
+        self.flash_completed = False
         # Unsaved changes tracking
         self.unsaved_changes = False
         # Graceful shutdown flag
@@ -483,7 +485,6 @@ class CameraConfigUtility(Tk.Toplevel):
         self.log_text.insert(Tk.END, "Logs will appear here...\n")
         # FIXED: Add circular log buffer to prevent memory bloat
         self.max_log_lines = 1000  # Keep last 1000 lines
-        self.log_line_count = 1
         # Thread/process/log queue coordination state.
         self.flash_thread = None
         self.log_queue = queue.Queue()
@@ -499,20 +500,23 @@ class CameraConfigUtility(Tk.Toplevel):
     def on_close(self):
         # Check for unsaved changes before closing
         if self.unsaved_changes:
-            result = messagebox.askyesno("Unsaved Changes", 
-                "You have unsaved changes. Are you sure you want to exit?", 
-                parent=self)
+            result = messagebox.askyesno("Unsaved Changes",
+                "You have unsaved changes. Are you sure you want to exit?",parent=self)
             if not result:
                 return
-        # Only warn if flashing is ACTUALLY in progress (not just finished)
-        with self.flash_process_lock:
-            flash_in_progress = self.flash_process is not None
-        if flash_in_progress:
-            if not messagebox.askyesno("Flash in progress", "Flashing/build is in progress. Close this window anyway?", parent=self):
+        # Only block close while actual flash/upload phase is in progress.
+        if self.flash_in_progress:
+            if not messagebox.askyesno("Flash in progress",
+                "Flashing is still in progress. Are you sure you want to close?", parent=self):
                 return
-            self.abort_flash()
-        # Signal shutdown to log poller thread
+        # Signal shutdown and try to stop background process cleanly if still running.
         self.shutdown_requested = True
+        with self.flash_process_lock:
+            if self.flash_process is not None and self.flash_process.poll() is None:
+                try:
+                    self.flash_process.terminate()
+                except Exception:
+                    pass
         self.cleanup_temp_flash_file()
         CameraConfigUtility.instance = None
         self.destroy()
@@ -730,7 +734,6 @@ class CameraConfigUtility(Tk.Toplevel):
             self.device_combobox["values"] = []
             self.device_combobox.set(self.NO_PORTS_SENTINEL)
             
-            
     #----------------------------------------------------------------------------------
     # Function to delete the temporary flash file
     #----------------------------------------------------------------------------------
@@ -779,7 +782,8 @@ class CameraConfigUtility(Tk.Toplevel):
         if device == self.NO_PORTS_SENTINEL:
             device = ""
         if device == "":
-            resp = messagebox.askyesno("No device specified", "No device port specified. Run 'esphome run' and choose device interactively?", parent=self)
+            resp = messagebox.askyesno("No device specified",
+                "No device port specified. Run 'esphome run' and choose device interactively?",parent=self)
             if not resp:
                 self.cleanup_temp_flash_file()
                 return
@@ -793,6 +797,9 @@ class CameraConfigUtility(Tk.Toplevel):
         self.flash_button.config(state="disabled")
         self.abort_button.config(state="normal")
         self.log_queue = queue.Queue()
+        self.flash_in_progress = True
+        self.flash_completed = False
+        self.shutdown_requested = False
         self.flash_thread = threading.Thread(target=self.thread_to_run_process, args=(cmd,), daemon=True)
         self.flash_thread.start()
         # Start log poller once.
@@ -820,43 +827,44 @@ class CameraConfigUtility(Tk.Toplevel):
     #----------------------------------------------------------------------------------
 
     def thread_to_run_process(self, cmd):
-        # Runs in background thread - Does NOT call Tk APIs directly (communicates through queue)
         try:
             esphome_bin = shutil.which(cmd[0])
             if esphome_bin is None:
-                self.log_queue.put("esphome executable not found on PATH. Please install esphome CLI (pip install esphome).\n")
+                self.log_queue.put(("LOG", "----------------------------------------------------------------------\n"))
+                self.log_queue.put(("LOG", "esphome executable not installed (pip install esphome).\n"))
+                self.log_queue.put(("LOG", "----------------------------------------------------------------------\n"))
+                self.log_queue.put(("STATUS", "DONE"))
                 return
-            # Thread-safe process creation
+            env = dict(os.environ)
+            env["PYTHONUNBUFFERED"] = "1"
             with self.flash_process_lock:
-                self.flash_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1, text=True)
+                self.flash_process = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, bufsize=1, text=True, env=env)
             proc = self.flash_process
-            for line in proc.stdout:
-                self.log_queue.put(line)
-            # Increased timeout from 2 seconds to 300 seconds (5 minutes) for ESPHome builds
-            proc.wait(timeout=300)
-            ret = proc.returncode
-            # Detect successful completion
+            flash_ok_sent = False
+            for raw_line in proc.stdout:
+                line = raw_line if raw_line is not None else ""
+                self.log_queue.put(("LOG", line))
+                l = line.lower()
+                if (not flash_ok_sent) and ("successfully uploaded program" in l):
+                    flash_ok_sent = True
+                    self.log_queue.put(("STATUS", "FLASH_OK"))
+                    self.log_queue.put(("LOG", "----------------------------------------------------------------------\n"))
+                    self.log_queue.put(("LOG", " ✓ Flash completed. Device logs continue below...\n"))
+                    self.log_queue.put(("LOG", "----------------------------------------------------------------------\n"))
+            ret = proc.wait()
             if ret == 0:
-                self.log_queue.put(f"\n✓ Flashing completed successfully!\n")
-                self.log_queue.put("__SUCCESS__\n")
+                self.log_queue.put(("STATUS", "SUCCESS"))
             else:
-                self.log_queue.put(f"\n✗ Process finished with return code {ret}\n")
-                self.log_queue.put("__DONE__\n")
-        except subprocess.TimeoutExpired:
-            # If process ignores terminate, escalate to kill.
-            try:
-                self.log_queue.put("Process did not terminate in time. Sending kill...\n")
-                with self.flash_process_lock:
-                    if self.flash_process is not None:
-                        self.flash_process.kill()
-                        self.flash_process.wait(timeout=5)
-                self.log_queue.put("\nProcess killed.\n")
-            except Exception as ex:
-                self.log_queue.put(f"\nFailed to kill process cleanly: {ex}\n")
-            self.log_queue.put("__DONE__\n")
+                self.log_queue.put(("LOG", "----------------------------------------------------------------------\n"))
+                self.log_queue.put(("LOG", f" ✗ Process finished with return code {ret}\n"))
+                self.log_queue.put(("LOG", "----------------------------------------------------------------------\n"))
+                self.log_queue.put(("STATUS", "DONE"))
         except Exception as ex:
-            self.log_queue.put(f"\nFlashing failed: {ex}\n")
-            self.log_queue.put("__DONE__\n")
+            self.log_queue.put(("LOG", "----------------------------------------------------------------------\n"))
+            self.log_queue.put(("LOG", f" ✗ Flashing failed: {ex}\n"))
+            self.log_queue.put(("LOG", "----------------------------------------------------------------------\n"))
+            self.log_queue.put(("STATUS", "DONE"))
         finally:
             with self.flash_process_lock:
                 self.flash_process = None
@@ -867,43 +875,55 @@ class CameraConfigUtility(Tk.Toplevel):
     #----------------------------------------------------------------------------------
 
     def poll_logs(self):
-        # Graceful shutdown check at start of loop
         if self.shutdown_requested:
             self.log_poller_running = False
             return
-        # Runs on Tk main thread - drains log queue, updates Text widget and finalizes button state when run is complete
         try:
             while True:
-                line = self.log_queue.get_nowait()
-                # Detect successful completion
-                if line == "__SUCCESS__\n":
-                    self.flash_button.config(state="normal")
-                    self.abort_button.config(state="disabled")
-                    self.log_poller_running = False
-                    with self.flash_process_lock:
-                        self.flash_process = None
-                    return
-                if line == "__DONE__\n":
-                    self.flash_button.config(state="normal")
-                    self.abort_button.config(state="disabled")
-                    self.log_poller_running = False
-                    return
-                # Add line to log and maintain circular buffer
-                self.log_text.insert(Tk.END, line)
-                self.log_line_count += 1
-                # If we exceed max lines, delete from top
-                if self.log_line_count > self.max_log_lines:
-                    self.log_text.delete("1.0", "2.0")  # Delete first line
-                    self.log_line_count -= 1
-                self.log_text.see(Tk.END)  # Auto-scroll to bottom
+                item = self.log_queue.get_nowait()
+                # Backward compatibility: old plain-string messages
+                if isinstance(item, tuple) and len(item) == 2:
+                    kind, payload = item
+                elif isinstance(item, str):
+                    kind, payload = "LOG", item
+                else:
+                    kind, payload = "LOG", str(item)
+                if kind == "STATUS":
+                    if payload == "FLASH_OK":
+                        # Upload complete; allow close without warning and allow reflash.
+                        self.flash_in_progress = False
+                        self.flash_completed = True
+                        self.flash_button.config(state="normal")
+                        # keep abort enabled because process may still be streaming logs
+                        self.abort_button.config(state="normal")
+                        continue
+                    if payload == "SUCCESS":
+                        self.flash_in_progress = False
+                        self.flash_button.config(state="normal")
+                        self.abort_button.config(state="disabled")
+                        self.log_poller_running = False
+                        return
+                    if payload == "DONE":
+                        self.flash_in_progress = False
+                        self.flash_button.config(state="normal")
+                        self.abort_button.config(state="disabled")
+                        self.log_poller_running = False
+                        return
+                # LOG path
+                self.log_text.insert(Tk.END, str(payload))
+                self.log_text.see(Tk.END)
+                current_lines = int(self.log_text.index("end-1c").split(".")[0])
+                if current_lines > self.max_log_lines:
+                    first_line_to_keep = current_lines - self.max_log_lines + 1
+                    self.log_text.delete("1.0", f"{first_line_to_keep}.0")
         except queue.Empty:
             pass
-        # Re-check shutdown flag before rescheduling
         if not self.shutdown_requested:
             self.after(100, self.poll_logs)
         else:
             self.log_poller_running = False
-            
+
+
 #########################################################################################################################################
     
     

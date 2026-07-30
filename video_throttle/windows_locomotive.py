@@ -1,5 +1,6 @@
 import tkinter as Tk
 import threading
+import logging
 import time
 import socket
 import cv2
@@ -54,9 +55,10 @@ class LocoConfigWindow(Tk.Toplevel):
             self.discovered_cameras[f"[Saved] {fwd_url}"] = fwd_url
         if rev_url and rev_url not in self.discovered_cameras.values():
             self.discovered_cameras[f"[Saved] {rev_url}"] = rev_url
-        self.scan_interval_ms = 1000
+        self.scan_interval_ms = 5000
         self.scan_thread = None
         self.scan_in_progress = False
+        self.user_just_selected = False
         self.preview_thread_running = False
         self.current_preview_url = ""
         self.last_preview_selection_label = "None"
@@ -152,6 +154,8 @@ class LocoConfigWindow(Tk.Toplevel):
         slider_container.columnconfigure(1, weight=1)        
         # Ensure comboboxes always have baseline options even before/without discovery.
         self.update_camera_dropdown_values()
+        # Run initial discovery scan immediately
+        self.run_discovery_if_idle()
         # Start periodic discovery loop
         self.schedule_discovery_tick()
         # Handle close cleanup to stop streaming threads safely
@@ -208,7 +212,8 @@ class LocoConfigWindow(Tk.Toplevel):
         class ESPHomeDiscovery:
             def __init__(self, callback):
                 self.callback = callback
-                
+                self.found_count = 0
+                    
             def add_service(self, zc, type_, name):
                 info = zc.get_service_info(type_, name)
                 if info:
@@ -218,62 +223,71 @@ class LocoConfigWindow(Tk.Toplevel):
                         except Exception:
                             continue
                         clean_name = name.split('.')[0]
-                        # ESPHome camera default streaming port is 8080
+                        # FIXED: Use hardcoded 8080 (the actual web server port)
+                        # mDNS port 80 is just the service port, not the web server port
                         url = f"http://{ip}:8080"
                         self.callback(clean_name, url)
+                        self.found_count += 1
 
             def update_service(self, zc, type_, name):
                 pass
 
             def remove_service(self, zc, type_, name):
                 pass
-
+    
         zeroconf = None
         try:
-            # Rebuild discovered map each scan, but preserve saved URLs
+            # Preserve baseline options AND saved URLs
+            baseline = {"None": "", "Manual URL Entry": ""}
             saved_urls = {k: v for k, v in self.discovered_cameras.items() if k.startswith("[Saved]")}
-            self.discovered_cameras = {"None": "", "Manual URL Entry": ""}
-            self.discovered_cameras.update(saved_urls)  # Re-add saved URLs
-            self.after(0, self.update_camera_dropdown_values)
+            self.discovered_cameras = baseline.copy()
+            self.discovered_cameras.update(saved_urls)
             zeroconf = Zeroconf()
             listener = ESPHomeDiscovery(self.register_discovered_camera)
-            _ = ServiceBrowser(zeroconf, ["_esphomelib._tcp.local.", "_http._tcp.local."], listener)
-            # Listen for ~1 second per pass
-            time.sleep(1.0)
+            service_browser = ServiceBrowser(zeroconf, ["_esphomelib._tcp.local.", "_http._tcp.local."], listener)
+            #  Wait longer for async callbacks to fire (3 seconds)
+            time.sleep(3.0)
+        except Exception as e:
+            logging.Error(f"[Discovery] Error during scan: {e}")
         finally:
             try:
                 if zeroconf is not None:
                     zeroconf.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logging.Error(f"[Discovery] Error closing Zeroconf: {e}")
             self.scan_in_progress = False
     
     def register_discovered_camera(self, name, url):
-        # Prefix discovered cameras with "DISCOVERED:"
+        url = url.rstrip('/')
         display_label = f"DISCOVERED: {name} ({url})"
         self.discovered_cameras[display_label] = url
-        # Safely update the combo selections inside the main Tkinter thread loop
-        self.after(0, self.update_camera_dropdown_values)
-
+        # Only debounce if user just selected something
+        if not self.user_just_selected:
+            self.after(0, self.update_camera_dropdown_values)            
+            
     def update_camera_dropdown_values(self):
+        # FIXED: Check if widgets still exist
+        if not hasattr(self, 'entries'):
+            return
         options = list(self.discovered_cameras.keys())
         for key in ["fwd_stream_url", "rev_stream_url"]:
+            if key not in self.entries:
+                continue
             combo = self.entries[key]
             current_val = combo.get().strip()
             # Only update values if they've actually changed (prevents dropdown glitch)
             current_options = list(combo["values"])
             if set(current_options) != set(options):
                 combo["values"] = options
-            # Preserve the current selection
+            # Preserve the current value (raw URL) after dropdown update
             if current_val:
-                # If current value is a raw URL (not in discovered list), keep it
-                if current_val not in self.discovered_cameras:
+                if current_val.startswith(("http://", "https://", "rtsp://")):
+                    combo.set(current_val)
+                elif current_val in self.discovered_cameras:
                     combo.set(current_val)
                 else:
-                    # It's a discovered label, use it
                     combo.set(current_val)
             else:
-                # Default to "None" if nothing is set
                 combo.set("None")
 
     # -------------------------------------------------------------------------
@@ -311,8 +325,15 @@ class LocoConfigWindow(Tk.Toplevel):
         
     def on_camera_selected(self, key):
         selected_label = self.entries[key].get().strip()
-        target_url = self.discovered_cameras.get(selected_label, selected_label).strip()
-        self.set_last_preview_selection(selected_label if selected_label else "None", target_url)
+        # The label stays in the combobox display - but we extract the URL for preview
+        target_url = self.discovered_cameras.get(selected_label, "").strip()
+        # Block discovery updates
+        self.user_just_selected = True
+        self.after(500, lambda: setattr(self, 'user_just_selected', False))
+        # Display in preview label (strip prefix for readability)
+        display_label = selected_label.replace("DISCOVERED: ", "").replace("[Saved] ", "")
+        self.set_last_preview_selection(display_label if display_label else "None", target_url)
+        # Start preview if there's a URL
         if target_url:
             if target_url != self.current_preview_url:
                 self.current_preview_url = target_url
@@ -320,17 +341,24 @@ class LocoConfigWindow(Tk.Toplevel):
         else:
             self.current_preview_url = ""
             self.show_no_feed_preview("No feed selected")
-            
+
     def on_camera_typed(self, key):
-        typed_url = self.entries[key].get().strip()
-        self.set_last_preview_selection("Custom / Manual", typed_url)
-        if typed_url.startswith("http://") or typed_url.startswith("rtsp://") or typed_url.startswith("https://"):
-            if typed_url != self.current_preview_url:
-                self.current_preview_url = typed_url
-                self.start_preview_stream(typed_url)
-        elif typed_url == "":
+        typed_text = self.entries[key].get().strip()
+        # Block discovery updates
+        self.user_just_selected = True
+        self.after(500, lambda: setattr(self, 'user_just_selected', False))
+        # If user typed a raw URL directly (not a label), use it
+        if typed_text.startswith(("http://", "https://", "rtsp://")):
+            self.set_last_preview_selection("Custom / Manual", typed_text)
+            if typed_text != self.current_preview_url:
+                self.current_preview_url = typed_text
+                self.start_preview_stream(typed_text)
+        elif typed_text == "":
             self.current_preview_url = ""
             self.show_no_feed_preview("No feed selected")
+        else:
+            # User typed something that's not a URL - maybe incomplete
+            self.set_last_preview_selection("Custom / Manual (incomplete)", typed_text)
             
     def start_preview_stream(self, url):
         self.stop_preview_stream(wait=True)
@@ -419,12 +447,19 @@ class LocoConfigWindow(Tk.Toplevel):
         # Manual validation for stream URLs (allow blank; if set, must look like URL)
         fwd_label = self.entries["fwd_stream_url"].get().strip()
         rev_label = self.entries["rev_stream_url"].get().strip()
-        fwd_url = self.discovered_cameras.get(fwd_label, fwd_label).strip()
-        rev_url = self.discovered_cameras.get(rev_label, rev_label).strip()
-        if fwd_url and not (fwd_url.startswith("http://") or fwd_url.startswith("https://") or fwd_url.startswith("rtsp://")):
+        # Convert labels to URLs
+        fwd_url = self.discovered_cameras.get(fwd_label, "").strip()
+        # If not found in discovered (user typed raw URL), use it directly
+        if not fwd_url:
+            fwd_url = fwd_label if fwd_label.startswith(("http://", "https://", "rtsp://")) else ""
+        rev_url = self.discovered_cameras.get(rev_label, "").strip()
+        if not rev_url:
+            rev_url = rev_label if rev_label.startswith(("http://", "https://", "rtsp://")) else ""
+        # Validate URLs
+        if fwd_url and not fwd_url.startswith(("http://", "https://", "rtsp://")):
             self.status_label.config(text="Forward stream URL must start with http://, https://, or rtsp://", fg="red")
             return
-        if rev_url and not (rev_url.startswith("http://") or rev_url.startswith("https://") or rev_url.startswith("rtsp://")):
+        if rev_url and not rev_url.startswith(("http://", "https://", "rtsp://")):
             self.status_label.config(text="Reverse stream URL must start with http://, https://, or rtsp://", fg="red")
             return
         updated_config = {

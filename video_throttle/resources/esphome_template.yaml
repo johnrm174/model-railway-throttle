@@ -1,4 +1,5 @@
 esphome:
+esphome:
   name: cabcam
   friendly_name: Train Cab Camera
   platformio_options:
@@ -33,7 +34,11 @@ logger:
   level: DEBUG
   hardware_uart: USB_SERIAL_JTAG
 
-# Activates a direct web page stream
+# FIXED: Add MJPEG server (lower latency than HTTP stream)
+mjpeg_server:
+  port: 8081
+
+# Keep the web server for fallback
 esp32_camera_web_server:
   - port: 8080
     mode: stream
@@ -51,11 +56,11 @@ esp32_camera:
   vsync_pin: GPIO38
   href_pin: GPIO47
   pixel_clock_pin: GPIO13
-  # Optimised settings for balancing clarity and frame rate
+  # FIXED: Optimised for lower latency
   resolution: 640x480
-  max_framerate: 20 fps
-  jpeg_quality: 25
-  vertical_flip: true
+  max_framerate: 15 fps          # Reduced from 20fps (less encoding overhead)
+  jpeg_quality: 20               # Reduced from 25 (faster compression)
+  vertical_flip: false
   horizontal_mirror: false
   frame_buffer_count: 1
   brightness: 0
