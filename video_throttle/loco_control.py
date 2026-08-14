@@ -414,10 +414,8 @@ class VideoStreamManager:
                     if kind == "frame" and frm_gen == generation:
                         newest_frame = payload
             except queue.Empty:
-                logging.warning(f"VideoStreamManager - gen={generation} - UI frame queue EMPTY ")
                 pass
             except Exception:
-                logging.warning(f"VideoStreamManager - gen={generation} - UI frame queue exception: {e}")
                 pass
         # 3) Paint if we have a frame
         if newest_frame is not None:
