@@ -30,13 +30,13 @@ class remote_dcc_throttle(Tk.LabelFrame):
                                   width=18, command=self.toggle_mqtt_connection)
         self.btn_mqtt.pack(side=Tk.LEFT, padx=5, pady=5, expand=True, fill=Tk.X)
 
-        self.btn_dcc_power = Tk.Button(toolbar_frame, text="Track Power: ???", font=('Arial', 9, 'bold'), 
+        self.track_power_button = Tk.Button(toolbar_frame, text="Track Power: ???", font=('Arial', 9, 'bold'), 
                                        width=18, state="disabled", command=self.toggle_dcc_power)
-        self.btn_dcc_power.pack(side=Tk.LEFT, padx=5, pady=5, expand=True, fill=Tk.X)
+        self.track_power_button.pack(side=Tk.LEFT, padx=5, pady=5, expand=True, fill=Tk.X)
 
-        self.btn_session = Tk.Button(toolbar_frame, text="Get Session", font=('Arial', 9, 'bold'), 
+        self.session_button = Tk.Button(toolbar_frame, text="Get Session", font=('Arial', 9, 'bold'), 
                                      width=18, state="disabled", command=self.toggle_session)
-        self.btn_session.pack(side=Tk.LEFT, padx=5, pady=5, expand=True, fill=Tk.X)
+        self.session_button.pack(side=Tk.LEFT, padx=5, pady=5, expand=True, fill=Tk.X)
         # Internal Tracking States
         self.mqtt_connected = False
         self.dcc_power_on = None
@@ -53,10 +53,11 @@ class remote_dcc_throttle(Tk.LabelFrame):
         self.enhanced_debugging = False
         # Callback for session updates
         self.session_callback = None
-        self.session_requested = False
+        self.session_request_sent = False
         # Scheduled events for timeout messages
-        self.session_timeout_id = None
-        self.track_power_timeout_id = None
+        self.session_request_timeout_id = None
+        self.track_power_on_timeout_id = None
+        self.track_power_off_timeout_id = None
         
     #----------------------------------------------------------------------------------------------------
     # Action triggers for Toolbar Buttons
@@ -96,7 +97,7 @@ class remote_dcc_throttle(Tk.LabelFrame):
             self.mqtt_connection_state_updated, self.broker_username, self.broker_password)
 
     #----------------------------------------------------------------------------------------------------
-    # API FUNCTIONS to update the current MQTT settings
+    # API FUNCTIONS to update the current MQTT settings, DCC address and session callback
     #----------------------------------------------------------------------------------------------------
 
     def update_parameters(self, broker_host:str, broker_port:int, broker_username:str, broker_password:str, enhanced_debugging:bool,
@@ -131,64 +132,134 @@ class remote_dcc_throttle(Tk.LabelFrame):
         self.session_callback = session_callback
                       
     #----------------------------------------------------------------------------------------------------
-    # Functions to Request/Release loco sessions from the remote node
+    # Functions to Request/release loco sessions from the remote node and deal with the responses
     #----------------------------------------------------------------------------------------------------
+    
+    def update_session_button_state(self, session_id:int):
+        if session_id > 0:
+            self.session_button.configure(text="Release Session", bg="#de2a2a", fg="white",
+                    activebackground="#b22020", activeforeground="white", state="normal")
+        else:
+            self.session_button.configure(text="Get Session", bg=self.default_bg, fg=self.default_fg,
+                    activebackground=self.default_abg, activeforeground=self.default_afg, state="normal")
     
     def request_loco_session(self):
         # Cancel any pending timeout messages
-        if self.session_timeout_id:
-            self.root_window.after_cancel(self.session_timeout_id)
-            self.session_timeout_id = None
+        if self.session_request_timeout_id is not None:
+            self.root_window.after_cancel(self.session_request_timeout_id)
+            self.session_request_timeout_id = None
         # To Request a remote session we send the DCC Address with a Session ID of zero
         # We should get an acknowledgement message from the remote node
         if self.dcc_address > 0:
-            self.session_requested = True
+            # Inhibit the button until we get a response or timeout
+            self.session_button.configure(state="disabled")
             mqtt_message = {"dccaddress": self.dcc_address, "sessionid": 0}
-            mqtt_interface.send_mqtt_message("dcc_locomotive_control_commands", 0, data=mqtt_message, retain=True,
+            mqtt_interface.send_mqtt_message("dcc_locomotive_control_commands", 0, data=mqtt_message, retain=False,
                     log_message=f"Loco Control: Publishing loco control message to broker :{mqtt_message}")
-            # Schedule a timeout check to generate an error message if we don't get a response within 5 seconds
-            self.session_timeout_id = self.root_window.after(3000, lambda: messagebox.showerror("Timeout error", "Session request timeout"))
+            self.session_request_sent = True
+            # Schedule a timeout check to generate an error message if we don't get a response within 3 seconds
+            self.session_request_timeout_id = self.root_window.after(3000, self.raise_session_request_timeout_error)
         else:
             messagebox.showerror("Invalid Address", "Please specify a valid DCC address")
-
+            
+    def raise_session_request_timeout_error(self):
+        messagebox.showerror("Timeout error", "Session request timeout")
+        self.session_request_timeout_id = None
+        self.session_button.configure(state="normal")
+        self.session_request_sent = False
+        
+    def session_request_response_received(self, session_id:int):
+        # Cancel any pending timeout messages
+        if self.session_request_timeout_id:
+            self.root_window.after_cancel(self.session_request_timeout_id)
+            self.session_request_timeout_id = None
+        # Raise an error if we have requested a session but the returned Session ID is zero
+        if session_id == 0 and self.session_request_sent:
+            messagebox.showerror("Session Error", f"Could not acquire session for DCC Address {self.dcc_address}")
+        # process the response
+        self.session_id = session_id
+        self.update_session_button_state(self.session_id)
+        self.session_request_sent = False
+        if self.session_callback:
+            self.session_callback(self.session_id)
+        
     def release_loco_session(self):
         if self.session_id > 0:
-            # Send a fire and forget message to release the current session
+            # Inhibit the button until we get a response or timeout
+            self.session_button.configure(state="disabled")
+            # Send a message to release the current session
             mqtt_message = {"dccaddress": 0, "sessionid": self.session_id}
-            mqtt_interface.send_mqtt_message("dcc_locomotive_control_commands", 0, data=mqtt_message, retain=True,
+            mqtt_interface.send_mqtt_message("dcc_locomotive_control_commands", 0, data=mqtt_message, retain=False,
                         log_message=f"Loco Control: Releasing session: {mqtt_message}")
-            # We always assume the session has been released
+            # The above message is fire and forget - we won't get an acknowledgement so
+            # We always assume the session has been successfully released by the remote node
             self.session_id = 0
-            self.session_response_received(self.session_id)
+            self.update_session_button_state(self.session_id)
+            if self.session_callback:
+                self.session_callback(self.session_id)
+                     
+    #----------------------------------------------------------------------------------------------------
+    # Functions to handle power state requests and handle responses
+    #----------------------------------------------------------------------------------------------------
 
-    #----------------------------------------------------------------------------------------------------
-    # Callbacks to handle power state requests/responses for a remote node
-    #----------------------------------------------------------------------------------------------------
+    def update_power_button_state(self, dcc_power_on:bool):
+        if dcc_power_on:
+            self.track_power_button.configure(text="Track Power: ON", bg="#2ade7a", fg="white",
+                        activebackground="#20b262", activeforeground="white", state="normal")
+        else:
+            self.track_power_button.configure(text="Track Power: OFF", bg=self.default_bg, fg=self.default_fg,
+                        activebackground=self.default_abg, activeforeground=self.default_afg, state="normal")
 
     def request_track_power_on(self):
         # Cancel any pending timeout messages
-        if self.track_power_timeout_id:
-            self.root_window.after_cancel(self.track_power_timeout_id)
-            self.track_power_timeout_id = None
+        if self.track_power_on_timeout_id:
+            self.root_window.after_cancel(self.track_power_on_timeout_id)
+            self.track_power_on_timeout_id = None
+        # Inhibit the button until we get a response or timeout
+        self.track_power_button.configure(state="disabled")
         # Send the command to the remote node. We should get an acknowledgement message from the remote node
         mqtt_message = {"requestdccpower": True}
-        mqtt_interface.send_mqtt_message("dcc_locomotive_control_commands", 0, data=mqtt_message, retain=True,
+        mqtt_interface.send_mqtt_message("dcc_locomotive_control_commands", 0, data=mqtt_message, retain=False,
                 log_message=f"Loco Control: Publishing loco control message to broker :{mqtt_message}")
-        # Schedule a timeout check to generate an error message if we don't get a response within 5 seconds
-        self.track_power_timeout_id = self.root_window.after(3000, lambda: messagebox.showerror("Timeout Error", "Track Power request timeout"))
-        
+        # Schedule a timeout check to generate an error message if we don't get a response within 3 seconds
+        self.track_power_on_timeout_id = self.root_window.after(3000, self.raise_track_power_on_timeout_error)
+
+    def raise_track_power_on_timeout_error(self):
+        messagebox.showerror("Timeout Error", "Track Power on request timeout")
+        self.track_power_on_timeout_id = None
+        self.track_power_button.configure(state="normal")
+
     def request_track_power_off(self):
         # Cancel any pending timeout messages
-        if self.track_power_timeout_id:
-            self.root_window.after_cancel(self.track_power_timeout_id)
-            self.track_power_timeout_id = None
+        if self.track_power_off_timeout_id:
+            self.root_window.after_cancel(self.track_power_off_timeout_id)
+            self.track_power_off_timeout_id = None
+        # Inhibit the button until we get a response or timeout
+        self.track_power_button.configure(state="disabled")
         # Send the command to the remote node. We should get an acknowledgement message from the remote node
         mqtt_message = {"requestdccpower": False}
-        mqtt_interface.send_mqtt_message("dcc_locomotive_control_commands", 0, data=mqtt_message, retain=True,
+        mqtt_interface.send_mqtt_message("dcc_locomotive_control_commands", 0, data=mqtt_message, retain=False,
                 log_message=f"Loco Control: Publishing loco control message to broker :{mqtt_message}")
-        # Schedule a timeout check to generate an error message if we don't get a response within 5 seconds
-        self.track_power_timeout_id = self.root_window.after(3000, lambda: messagebox.showerror("Timeout Error", "Track Power request timeout"))
+        # Schedule a timeout check to generate an error message if we don't get a response within 3 seconds
+        self.track_power_off_timeout_id = self.root_window.after(3000, self.raise_track_power_off_timeout_error)
 
+    def raise_track_power_off_timeout_error(self):
+        messagebox.showerror("Timeout Error", "Track Power off request timeout")
+        self.track_power_off_timeout_id = None
+        self.track_power_button.configure(state="normal")
+
+    def track_power_response_received(self, dcc_power_state:bool):
+        # Cancel any pending timeout messages
+        if self.track_power_on_timeout_id:
+            self.root_window.after_cancel(self.track_power_on_timeout_id)
+            self.track_power_on_timeout_id = None
+        if self.track_power_off_timeout_id:
+            self.root_window.after_cancel(self.track_power_off_timeout_id)
+            self.track_power_off_timeout_id = None
+        # Handle the track power response
+        self.dcc_power_on = dcc_power_state
+        self.update_power_button_state(self.dcc_power_on)
+        
     #----------------------------------------------------------------------------------------------------
     # State Synchronization & UI Interlock Management
     #----------------------------------------------------------------------------------------------------
@@ -199,52 +270,21 @@ class remote_dcc_throttle(Tk.LabelFrame):
             self.btn_mqtt.configure(text="MQTT: Connected", bg="#2ae1de", fg="black",
                                     activebackground="#20b5b2", activeforeground="black", state="normal")
             # Enable Power and Session buttons when connected
-            self.btn_dcc_power.configure(state="normal")
-            self.btn_session.configure(state="normal")
+            self.track_power_button.configure(state="normal")
+            self.session_button.configure(state="normal")
         else:
             self.btn_mqtt.configure(text="MQTT: Disconnected", bg=self.default_bg, fg=self.default_fg,
                                     activebackground=self.default_abg, activeforeground=self.default_afg)
             # Disable Power and Session buttons
-            self.btn_dcc_power.configure(state="disabled")
-            self.btn_session.configure(state="disabled")
-
-    def dcc_power_state_updated(self, dcc_power_state:bool):
-        # Cancel any pending timeout messages
-        if self.track_power_timeout_id:
-            self.root_window.after_cancel(self.track_power_timeout_id)
-            self.track_power_timeout_id = None
-        # Handle the track power response
-        self.dcc_power_on = dcc_power_state
-        if self.dcc_power_on:
-            self.btn_dcc_power.configure(text="Track Power: ON", bg="#2ade7a", fg="white",
-                                         activebackground="#20b262", activeforeground="white")
-        else:
-            self.btn_dcc_power.configure(text="Track Power: OFF", bg=self.default_bg, fg=self.default_fg,
-                                         activebackground=self.default_abg, activeforeground=self.default_afg)
-
-    def session_response_received(self, session_id:int):
-        # Cancel any pending timeout messages
-        if self.session_timeout_id:
-            self.root_window.after_cancel(self.session_timeout_id)
-            self.session_timeout_id = None
-        # Handle the session response
-        self.session_id = session_id
-        if self.session_id > 0:
-            self.btn_session.configure(text="Release Session", bg="#de2a2a", fg="white",
-                                       activebackground="#b22020", activeforeground="white")
-        else:
-            
-            self.btn_session.configure(text="Get Session", bg=self.default_bg, fg=self.default_fg,
-                                       activebackground=self.default_abg, activeforeground=self.default_afg)
-            # Only pop up an error message if we have requested a session
-            if self.session_requested:
-                messagebox.showerror("Session Error", f"Could not acquire session for DCC Address {self.dcc_address}")
-        self.session_requested = False
-        if self.session_callback:
-            self.session_callback(self.session_id)
+            self.track_power_button.configure(state="disabled")
+            self.session_button.configure(state="disabled")
 
     #----------------------------------------------------------------------------------------------------
     # Callback for handling loco session and DCC power response messages received from the remote node
+    # Example messages are as follows:
+    # Track Power: {"sourceidentifier":"BOX1" , "dccpowerstate": True}
+    # Failed Session Request Response: {"sourceidentifier":"BOX1" , "dccaddress": 123, "sessionid": 0}
+    # Successful Session Request Response: {"sourceidentifier":"BOX1" , "dccaddress": 123, "sessionid": 10}
     #----------------------------------------------------------------------------------------------------
 
     def handle_mqtt_dcc_locomotive_control_response(self, message):
@@ -253,21 +293,23 @@ class remote_dcc_throttle(Tk.LabelFrame):
         else:
             # All Messages include the following mandatory elements
             source_node = message["sourceidentifier"]
-            # The following elements are optional - if not present then the values will be set to none
-            dcc_address = message.get("dccaddress")
-            session_id = message.get("sessionid")
-            dcc_power_state = message.get("dccpowerstate")
-            # Handle a DCC Power is ON or OFF message
-            if dcc_power_state is not None:
-                logging.debug(f"Loco Control: Received DCC Power State message from {source_node} "
-                                   +f" - DCC Power state: {dcc_power_state}")
-                self.dcc_power_state_updated(dcc_power_state)
-            # Handle a Loco Session acknowledgement message
-            elif dcc_address == self.dcc_address and self.session_requested and session_id is not None:
-                logging.debug(f"Loco Control: Received session acknowledgement from {source_node}: "
-                                   +f"DCC Address {dcc_address}, Session ID is {session_id}")
-                self.session_response_received(session_id)
-                self.session_requested = False
+            # Only process the message if the messige is from 'our' command station node
+            command_station_node_identifier_to_match = self.command_station_node_identifier+"-0"
+            if source_node == command_station_node_identifier_to_match:
+                # The following elements are optional - if not present then the values will be set to none
+                dcc_address = message.get("dccaddress")
+                session_id = message.get("sessionid")
+                dcc_power_state = message.get("dccpowerstate")
+                # Handle a DCC Power is ON or OFF message
+                if dcc_power_state is not None:
+                    logging.debug(f"Loco Control: Received DCC Power State message from {source_node} "
+                                       +f" - DCC Power state: {dcc_power_state}")
+                    self.track_power_response_received(dcc_power_state)
+                # Handle a Loco Session acknowledgement message 
+                elif dcc_address == self.dcc_address and session_id is not None:
+                    logging.debug(f"Loco Control: Received session acknowledgement from {source_node}: "
+                                       +f"DCC Address {dcc_address}, Session ID is {session_id}")
+                    self.session_request_response_received(session_id)
 
     #----------------------------------------------------------------------------------------------------
     # Function to gracefully shut down on window close
@@ -275,8 +317,9 @@ class remote_dcc_throttle(Tk.LabelFrame):
             
     def on_close(self):
         # Release any active sessions and disconnect from broker
-        self.release_loco_session()
-        mqtt_interface.mqtt_broker_disconnect()
+        if self.mqtt_connected:
+            self.release_loco_session()
+            mqtt_interface.mqtt_broker_disconnect()
 
 
 ##############################################################################################################################

@@ -124,6 +124,12 @@ node_config["list_of_subscribed_topics"] = []
 node_config["callbacks"] = {}
 
 #-----------------------------------------------------------------------------------------------
+# Thread locks to protect the node_config dict for connect/disconnect
+#-----------------------------------------------------------------------------------------------
+
+node_config_thread_lock = threading.Lock()
+
+#-----------------------------------------------------------------------------------------------
 # The MQTT client is held globally:
 #-----------------------------------------------------------------------------------------------
 
@@ -138,6 +144,7 @@ heartbeats = {}
 
 #-----------------------------------------------------------------------------------------------
 # API function used by the editor to get the list of connected nodes and when they were last seen
+# This should always be called from the main Tkinter Thread
 #-----------------------------------------------------------------------------------------------
 
 def get_mqtt_node_status():
@@ -222,8 +229,8 @@ threading.Thread(target=mqtt_publish_thread, daemon=True).start()
 
 #-----------------------------------------------------------------------------------------------
 # Internal function to send out a heartbeat message from the node and then schedule a
-# subsequent call to the function (according to the 'heartbeat_frequency') via the
-# root.after method.Initially called by the 'on_connect' function.
+# subsequent call to the function (according to the 'heartbeat_frequency') in the main
+# Tkinter Thread via the root.after method. Initially called by the 'on_connect' function.
 #-----------------------------------------------------------------------------------------------
 
 def publish_heartbeat_message():
@@ -311,12 +318,14 @@ def on_connect(mqtt_client, userdata, flags, rc):
         time.sleep(0.1)
         # As we set up our broker connection with 'cleansession=true' a disconnection will have removed
         # all client connection information from the broker (including knowledge of the topics we have
-        # subscribed to) - we therefore need to re-subscribe to all topics with this new connection
-        # Note that this means we will immediately receive all retained messages for those topics
-        if len(node_config["list_of_subscribed_topics"]) > 0:
-            for topic in node_config["list_of_subscribed_topics"]:
-                if node_config["enhanced_debugging"]: logging.debug("MQTT-Client: Subscribing to '"+topic+"' from Broker")
-                mqtt_client.subscribe(topic)
+        # subscribed to) - we therefore need to re-subscribe to all topics with this new connection.
+        # Note that we use the thread_lock to prevent the list_of_subscribed_topics changing under us.
+        # Note also that we will almost immediately receive all retained messages for those topics.
+        with node_config_thread_lock:
+            if len(node_config["list_of_subscribed_topics"]) > 0:
+                for topic in node_config["list_of_subscribed_topics"]:
+                    if node_config["enhanced_debugging"]: logging.debug("MQTT-Client: Subscribing to '"+topic+"' from Broker")
+                    mqtt_client.subscribe(topic)
         # Re subscribe to all heartbeat and shutdown messages on the specified network
         # Topic format for these messages is: "<Message-Type>/<Network-ID>"
         heartbeat_topic = "heartbeat"+"/"+node_config["network_identifier"]
@@ -636,7 +645,9 @@ def subscribe_to_mqtt_messages (message_type:str,item_node:str,item_id:int,callb
         mqtt_client.subscribe(topic)
     elif node_config["enhanced_debugging"]: logging.debug("MQTT-Client: Adding subscription topic '"+topic+"'")
     # Add to the list of subscribed topics (so we can re-subscribe on reconnection)
-    node_config["list_of_subscribed_topics"].append(topic)
+    with node_config_thread_lock:
+        if topic not in node_config["list_of_subscribed_topics"]:
+            node_config["list_of_subscribed_topics"].append(topic)
     # Save the callback details for when we receive a message on the topic
     node_config["callbacks"][topic] = callback
     return()

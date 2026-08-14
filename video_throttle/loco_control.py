@@ -4,6 +4,8 @@ import threading
 import math
 import numpy
 import time
+import multiprocessing
+import queue
 
 import cv2  # Open Source Computer Vision Library (for cab-view video streams)
 import sounddevice  # Cross-platform audio stream management
@@ -88,22 +90,382 @@ class dial(Tk.Canvas):
         x = self.center + self.radius * 0.85 * math.cos(rad)
         y = self.center + self.radius * 0.85 * math.sin(rad)
         self.coords(self.needle, self.center, self.center, x, y)
+        
+#--------------------------------------------------------------------------------------------------------
+#    Isolated subprocess that handles blocking video I/O. Communicates only via queues.
+#    Invariant: Frame queue has maxsize=2 (always discard oldest when full).
+#    Invariant: Status messages are sent only on state changes (connected, lost, error).
+#--------------------------------------------------------------------------------------------------------
+   
+class VideoReaderProcess(multiprocessing.Process):
+    def __init__(self, url, generation, frame_queue, status_queue, stop_event, width, height, brightness, contrast):
+        super().__init__(daemon=True)
+        self.url = url
+        self.generation = generation
+        self.frame_queue = frame_queue
+        self.status_queue = status_queue
+        self.stop_event = stop_event
+        self.width = width
+        self.height = height
+        self.brightness = brightness
+        self.contrast = contrast
+
+    def push_status(self, message):
+        # Send a status update to the UI (non-blocking).
+        try:
+            self.status_queue.put_nowait(("status", self.generation, message))
+        except queue.Full:
+            pass  # Status queue full; skip—UI will see next status on recovery
+
+    def push_frame(self, frame_rgb):
+        # Push frame, silently dropping oldest if queue is full (FIFO freshness)
+        try:
+            self.frame_queue.put_nowait(("frame", self.generation, frame_rgb))
+        except queue.Full:
+            try:
+                self.frame_queue.get_nowait()  # Remove oldest
+                self.frame_queue.put_nowait(("frame", self.generation, frame_rgb))  # Add newest
+            except Exception:
+                pass  # If this fails, skip this frame and move on
+
+    def run(self):
+        cap = None
+        fail_count = 0
+        try:
+            logging.debug(f"VideoReaderProcess - gen={self.generation} - Initialising")
+            cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
+            try: cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 2000)
+            except Exception: pass
+            try: cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 1000)
+            except Exception: pass
+            try: cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception: pass
+            if cap is None or not cap.isOpened():
+                logging.warning(f"VideoReaderProcess - gen={self.generation} - FAILED to open {self.url}")
+                self.push_status("Unable to open video stream")
+                return
+            logging.debug(f"VideoReaderProcess - gen={self.generation} - Opened {self.url}, starting video stream")  
+            while not self.stop_event.is_set():
+                try:
+                    ret, frame = cap.read()
+                    if self.stop_event.is_set():
+                        break
+                    if not ret or frame is None:
+                        fail_count += 1
+                        if fail_count >= 3:
+                            logging.warning(f"[VIDEO] Reader gen={self.generation} - Lost video stream")
+                            self.push_status("Video stream lost")
+                            break
+                        time.sleep(0.05)
+                        continue 
+                    fail_count = 0
+                    frame = cv2.resize(frame, (self.width, self.height))
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    frame_float = frame.astype(numpy.float32) / 255.0
+                    frame_float = self.contrast * (frame_float - 0.5) + 0.5
+                    brightness_factor = self.brightness / 100.0
+                    frame_float = frame_float + brightness_factor
+                    frame_float = numpy.clip(frame_float, 0.0, 1.0)
+                    frame = (frame_float * 255).astype(numpy.uint8)
+                    self.push_frame(frame)
+                except Exception as e:
+                    logging.warning(f"VideoReaderProcess - gen={self.generation} - Exception: {e}")
+                    self.push_status(f"Video stream error: {e}")
+                    break
+        finally:
+            if cap is not None:
+                try: cap.release()
+                except Exception: pass
+                logging.debug(f"VideoReaderProcess - gen={self.generation} - Exiting")
 
 #--------------------------------------------------------------------------------------------------------
-# Class for a complex throttle Window
+# Simplified Video Management: Single Source of Truth
+#    Encapsulates all video lifecycle logic. Separates concerns:
+#    - State tracking (running, generation, direction, URLs)
+#    - Process lifecycle (start, stop, monitoring)
+#    - UI updates (queues, painting, messages)
+#    Invariants:
+#    - Only one generation's reader process exists at a time
+#    - process is None ⟺ not running
+#    - Reader process is fully stopped before incrementing generation
+#    - Status messages are queued exactly once per lifecycle event
+#--------------------------------------------------------------------------------------------------------
+
+class VideoStreamManager:
+    
+    def __init__(self, root_window, show_message_callback):
+        self.root_window = root_window
+        self.show_message_callback = show_message_callback
+        # State tracking (protected by state_lock)
+        self.state_lock = threading.Lock()
+        self.video_running = False
+        self.video_direction = None
+        self.video_connect_generation = 0
+        self.fwd_stream_url = ""
+        self.rev_stream_url = ""
+        # Process and queue references (protected by state_lock)
+        self.video_reader_process = None
+        self.video_reader_stop_event = None
+        self.video_frame_queue = None
+        self.video_status_queue = None
+        # Timing (protected by state_lock)
+        self.video_last_frame_ts = 0.0
+        self.video_last_reconnect_ts = 0.0
+        self.video_stall_timeout_s = 3.0
+        self.video_reconnect_cooldown_s = 1.0
+        # Switch debouncing (separate lock to avoid contention)
+        self.switch_lock = threading.Lock()
+        self.last_video_switch_ts = 0.0
+        # Current status/error (protected by state_lock)
+        self.video_status = None
+        # Stream adjustments
+        self.stream_brightness = 0
+        self.stream_contrast = 1.0
+
+    def set_direction(self, direction: bool):
+        # Toggle video direction; None means no direction selected.
+        with self.state_lock:
+            if self.video_direction == direction:
+                self.video_direction = None
+            else:
+                self.video_direction = direction
+        self.update_stream_source()
+
+    def set_stream_urls(self, fwd_url: str, rev_url: str):
+        # Update the forward and reverse stream URLs
+        with self.state_lock:
+            self.fwd_stream_url = (fwd_url or "").strip()
+            self.rev_stream_url = (rev_url or "").strip()
+
+    def set_stream_adjustments(self, brightness: int, contrast: float):
+        # Update brightness/contrast; only affects new readers.
+        with self.state_lock:
+            self.stream_brightness = int(brightness)
+            self.stream_contrast = float(contrast)
+
+    def update_stream_source(self):
+        # Called when direction changes or URLs update. Debounced at 250ms to avoid thrashing.
+        # Orchestrates: cleanup old reader → check direction/URLs → start new reader.
+        with self.switch_lock:
+            now = time.monotonic()
+            if now - self.last_video_switch_ts < 0.25:
+                return  # Debounced; ignore rapid calls
+            self.last_video_switch_ts = now
+        # Snapshot intent (direction + URL) under lock
+        with self.state_lock:
+            direction = self.video_direction
+            target_url = None
+            if direction is True:
+                target_url = self.fwd_stream_url
+            elif direction is False:
+                target_url = self.rev_stream_url
+            direction_name = "Forward" if direction is True else "Reverse" if direction is False else None
+        # Stop any existing reader synchronously (no UI thread blocking)
+        self._stop_reader_sync()
+        # Clear any stale error status when switching direction
+        with self.state_lock:
+            self.video_status = None
+        # Handle each case
+        if direction is None:
+            # No direction selected; show idle message (on Tk thread)
+            self.root_window.after(0, lambda: self.show_message_callback(
+                "Select cab direction (FWD/REV) to start video"))
+            return
+        if not target_url:
+            # Direction selected but no URL (on Tk thread)
+            self.root_window.after(0, lambda dn=direction_name: self.show_message_callback(
+                f"No {dn.lower()} video stream URL configured", color="orange"))
+            return
+        # Valid direction + URL; start new reader (on Tk thread for message, then off-Tk for reader)
+        self.root_window.after(0, lambda: self.show_message_callback("Connecting to cab view...", color="orange"))
+        self._start_reader(target_url)
+
+    def _stop_reader_sync(self):
+        # Synchronously stop the current reader process and drain queues.
+        # Does NOT invalidate generation (allow immediate re-use if caller wishes).
+        p = None
+        ev = None
+        with self.state_lock:
+            p = self.video_reader_process
+            ev = self.video_reader_stop_event
+            self.video_reader_process = None
+            self.video_reader_stop_event = None
+            self.video_running = False
+            # Note: do NOT increment generation here; let caller decide
+        if p is None:
+            return
+        # Signal stop
+        try:
+            if ev is not None:
+                ev.set()
+        except Exception:
+            pass
+        # Join with timeout
+        try:
+            p.join(timeout=0.2)
+        except Exception:
+            pass
+        # Force-terminate if still alive
+        if p.is_alive():
+            try:
+                p.terminate()
+            except Exception:
+                pass
+            try:
+                p.join(timeout=0.3)
+            except Exception:
+                pass
+        # Drain queues off Tk thread to avoid blocking
+        threading.Thread(target=self._drain_queues, daemon=True).start()
+
+    def _drain_queues(self):
+        # Non-blocking queue drain (safe to call from background thread)
+        with self.state_lock:
+            fq = self.video_frame_queue
+            sq = self.video_status_queue
+        try:
+            if fq is not None:
+                while True:
+                    fq.get_nowait()
+        except (queue.Empty, Exception):
+            pass
+        try:
+            if sq is not None:
+                while True:
+                    sq.get_nowait()
+        except (queue.Empty, Exception):
+            pass
+
+    def _start_reader(self, url: str):
+        # Create and start a new reader process.
+        # Increments generation and sets running=True before returning.
+        with self.state_lock:
+            self.video_connect_generation += 1
+            gen = self.video_connect_generation
+            self.video_running = True
+            self.video_status = None
+            self.video_last_frame_ts = time.monotonic()
+            self.video_frame_queue = multiprocessing.Queue(maxsize=2)
+            self.video_status_queue = multiprocessing.Queue(maxsize=8)
+            self.video_reader_stop_event = multiprocessing.Event()
+        reader = VideoReaderProcess(
+            url=url,
+            generation=gen,
+            frame_queue=self.video_frame_queue,
+            status_queue=self.video_status_queue,
+            stop_event=self.video_reader_stop_event,
+            width=480,
+            height=270,
+            brightness=self.stream_brightness,
+            contrast=self.stream_contrast)
+        reader.start()
+        with self.state_lock:
+            self.video_reader_process = reader
+        self.root_window.after(0, lambda: self.show_message_callback("Connecting to cab view...", color="orange"))
+
+    def ui_update_loop(self):
+        # Non-blocking UI paint loop. Called from complex_throttle.update_video_stream() method.
+        # Returns immediately but re-schedules itself via the root_window.after() method
+        #    1. Check if stream is still running; exit early if not
+        #    2. Drain status queue (exactly once; keep last status)
+        #    3. Drain frame queue (keep newest frame only)
+        #    4. Paint frame if available
+        #    5. Monitor for stall and trigger reconnect if needed
+        #    6. Re-schedule for 30ms later
+        with self.state_lock:
+            running = self.video_running
+            generation = self.video_connect_generation
+            sq = self.video_status_queue
+            fq = self.video_frame_queue
+            last_frame_ts = self.video_last_frame_ts
+            status = self.video_status
+        # If not running, show final status and exit
+        if not running:
+            if status:
+                self.show_message_callback(status, color="red")
+            return
+        now = time.monotonic()
+        frame_received = False
+        latest_status = None
+        # 1) Drain status queue—keep only the last status message
+        if sq is not None:
+            try:
+                while True:
+                    kind, msg_gen, message = sq.get_nowait()
+                    if kind == "status" and msg_gen == generation:
+                        latest_status = message
+            except queue.Empty:
+                pass
+            except Exception:
+                pass
+        # If we got a status message (e.g., "Video stream lost"), apply it immediately
+        if latest_status is not None:
+            with self.state_lock:
+                self.video_status = latest_status
+                self.video_running = False
+            self.show_message_callback(latest_status, color="red")
+            return
+        # 2) Drain frame queue—keep only the newest frame
+        newest_frame = None
+        if fq is not None:
+            try:
+                while True:
+                    kind, frm_gen, payload = fq.get_nowait()
+                    if kind == "frame" and frm_gen == generation:
+                        newest_frame = payload
+            except queue.Empty:
+                logging.warning(f"VideoStreamManager - gen={generation} - UI frame queue EMPTY ")
+                pass
+            except Exception:
+                logging.warning(f"VideoStreamManager - gen={generation} - UI frame queue exception: {e}")
+                pass
+        # 3) Paint if we have a frame
+        if newest_frame is not None:
+            frame_received = True
+            with self.state_lock:
+                self.video_last_frame_ts = now
+            try:
+                img = Image.fromarray(newest_frame)
+                img_tk = ImageTk.PhotoImage(image=img)
+                # Delegate painting to caller (complex_throttle)—just return the PhotoImage
+                # Caller's update_video_stream() will handle the Canvas operations
+                return img_tk
+            except Exception as e:
+                logging.warning(f"VideoStreamManager - gen={generation} - Failed to render video frame: {e}")
+                with self.state_lock:
+                    self.video_status = "Video render error"
+                    self.video_running = False
+                self.show_message_callback(self.video_status, color="red")
+                return
+        # 4) Stall watchdog: if no frame for >stall_timeout_s, mark as failed (no retry)
+        if not frame_received:
+            if now - last_frame_ts > self.video_stall_timeout_s:
+                with self.state_lock:
+                    self.video_status = "Video connection failed"
+                    self.video_running = False
+                self.show_message_callback(self.video_status, color="red")
+                return
+        # 5) Re-schedule for 30ms later
+        return None  # Caller will re-schedule
+
+    def cleanup(self):
+        # Called on application shutdown. Safely stops all readers and clears state.
+        with self.state_lock:
+            self.video_running = False
+            self.video_connect_generation += 1
+        self._stop_reader_sync()
+
+#--------------------------------------------------------------------------------------------------------
+# Complex_throttle Class
 #--------------------------------------------------------------------------------------------------------
 
 class complex_throttle(Tk.LabelFrame):
-    
-    #----------------------------------------------------------------------------------------------------
-    # Init Function to create all UI Elements for the complex throttle
-    #----------------------------------------------------------------------------------------------------
     
     def __init__(self, root_window, parent_frame):
         super().__init__(parent_frame)
         self.pack(fill=Tk.BOTH, expand=False)
         self.root_window = root_window
-        # --- UI Sub-Component: Cab Video Frame ---
+        # ===== VIDEO FRAME SETUP =====
         self.video_frame = Tk.Frame(self, bg="black", width=480, height=270)
         self.video_frame.pack(side=Tk.TOP, pady=5)
         self.video_frame.pack_propagate(False)
@@ -113,15 +475,14 @@ class complex_throttle(Tk.LabelFrame):
         self.video_button_frame = Tk.Frame(self.video_frame, bg="black", height=30)
         self.video_button_frame.pack(side=Tk.TOP, fill=Tk.X)
         self.video_button_frame.pack_propagate(False)
-        # Bottom-left REV buttons
         self.video_btn_rev = Tk.Button(self.video_button_frame, text="REV", font=('Arial', 8, 'bold'),
-                    fg="white", bg="#444444", width=8, height=1, command=lambda: self.set_video_direction(False))
+                    fg="white", bg="#444444", width=8, height=1, command=lambda: self._on_video_direction(False))
         self.video_btn_rev.pack(side=Tk.LEFT, padx=5, pady=2)
-        # Bottom-right FWD button
+        
         self.video_btn_fwd = Tk.Button(self.video_button_frame, text="FWD", font=('Arial', 8, 'bold'),
-                    fg="white", bg="#444444", width=8, height=1, command=lambda: self.set_video_direction(True))
+                    fg="white", bg="#444444", width=8, height=1, command=lambda: self._on_video_direction(True))
         self.video_btn_fwd.pack(side=Tk.RIGHT, padx=5, pady=2)
-        # --- UI Sub-Component: Control Desk Base Frame ---
+        # ===== CONTROL DESK (unchanged) =====
         self.control_desk = Tk.Frame(self)
         self.control_desk.pack(side=Tk.TOP, fill=Tk.X, padx=10, pady=5)
         # Left Column: Locomotive Power Throttle Slider (8-Notch Detents)
@@ -136,7 +497,6 @@ class complex_throttle(Tk.LabelFrame):
         # Center Column: Rolling Stock Mass Config & Dashboard Dials
         center_dashboard = Tk.Frame(self.control_desk)
         center_dashboard.pack(side=Tk.LEFT, padx=5, fill=Tk.BOTH)
-        # Train Weight Settings
         self.total_mass_frame = Tk.Frame(center_dashboard)
         self.total_mass_frame.pack(pady=5)
         self.mass_label_frame = Tk.Frame(self.total_mass_frame)
@@ -149,7 +509,6 @@ class complex_throttle(Tk.LabelFrame):
         self.load_mass_entry = integer_entry_box(line2_frame, width=5, min_val=0, max_val=3000, callback=self.mass_updated)
         self.load_mass_entry.pack(side=Tk.LEFT)
         Tk.Label(line2_frame, text=" (Tonnes)").pack(side=Tk.LEFT)
-        # Instrument Layout
         self.speed_dial = dial(center_dashboard, 180, "MPH", 0, 100, 10, "orange")
         self.speed_dial.pack(pady=0)
         aux_dial_frame = Tk.Frame(center_dashboard)
@@ -179,25 +538,11 @@ class complex_throttle(Tk.LabelFrame):
         self.btn_fwd = Tk.Button(button_console, text="FWD", font=('Arial', 10, 'bold'), width=6, height=2,
                                  state="disabled", command=lambda: self.set_direction(True))
         self.btn_fwd.pack(side=Tk.LEFT, expand=True, padx=5, pady=5)
-        # Loop and Thread Structural Targets
-        self.next_physics_loop_event = None
+        # ===== VIDEO MANAGER INSTANCE =====
+        self.video_mgr = VideoStreamManager(root_window, self._show_video_message)
         self.next_video_loop_event = None
-        self.audio_stream = None
-        self.video_capture = None
-        self.video_running = False
-        self.video_direction = None
-        self.video_photo = None
-        self.video_reader_thread = None
-        self.video_lock = threading.Lock()
-        self.latest_frame = None
-        self.video_status = None
-        self.video_connect_generation = 0
-        self.video_state_lock = threading.Lock()
-        self.video_switch_lock = threading.Lock()
-        self.last_video_switch_ts = 0.0
-        self.stream_brightness = 0
-        self.stream_contrast = 1.0
-        # Locomotive Active State Placeholders
+        self.current_video_image = None  # Hold PhotoImage to prevent GC
+        # ===== LOCOMOTIVE STATE =====
         self.loco_name = ""
         self.loco_mass = 0
         self.loco_max_speed = 100
@@ -207,396 +552,93 @@ class complex_throttle(Tk.LabelFrame):
         self.brake_responsiveness = 0.0
         self.axle_offsets = None
         self.axle_joint_indices = []
-        self.fwd_stream_url = ""
-        self.rev_stream_url = ""
         self.load_mass = 0
         self.total_mass = 0
-        self.dcc_direction = None  
-        self.dcc_speed_value = 0 
-        self.session_id = 0 
+        self.dcc_direction = None
+        self.dcc_speed_value = 0
+        self.session_id = 0
         self.dcc_speed_scaling = 1.0
-        # --- Thread-Safety primitives ---
         self.cached_brake_demand = 100.0
-        self.brake_demand_lock = threading.Lock()
-        self.power_state_lock = threading.Lock()  # Protects actual_power and actual_brake
-        # Procedural Audio Synth Variables
+        # ===== AUDIO STATE =====
+        self.audio_stream = None
         self.sample_rate = 22050
         self.stereo_buffer = numpy.zeros((8192, 2))
         self.hiss_buffer_len = self.sample_rate * 2
         self.pre_baked_hiss = numpy.random.normal(0, 0.12, self.hiss_buffer_len) * 0.2
         self.audio_sample_index = 0
-        self.hiss_playback_index = 0  # For modulo-based cycling instead of RNG
+        self.hiss_playback_index = 0
         self.joint_spacing = 120.0
         self.clack_lock = threading.Lock()
         self.pending_clacks = []
         self.active_clacks = []
-        # Ensure clack sample always exists, even before enable_audio() runs.
         self.clack_sample = numpy.array([])
-        # ON INIT: Reset dials/variables to default and fully enable all controls
+        # ===== PHYSICS STATE =====
+        self.next_physics_loop_event = None
+        self.brake_demand_lock = threading.Lock()
+        self.power_state_lock = threading.Lock()
+        # Initialize
         self.reset_to_defaults()
         self.set_controls_disabled_state(disabled=False)
 
     #----------------------------------------------------------------------------------------------------
-    # Shared Architectural Helper Methods
+    # VIDEO INTEGRATION METHODS
     #----------------------------------------------------------------------------------------------------
 
-    def reset_to_defaults(self):
-        # Running Physics States
-        self.target_throttle = 0.0
-        self.target_brake = 0.0
-        self.actual_power = 0.0
-        self.actual_brake = 0.0
-        self.current_speed = 0.0
-        self.iterations = 0
-        self.track_distance = 0.0
-        # Clear any pending audio events
-        if hasattr(self, 'pending_clacks'): self.pending_clacks.clear()
-        if hasattr(self, 'active_clacks'): self.active_clacks.clear()
-        # Set the throttle, brake sliders and direction buttons to their defaults
-        self.throttle_demand.set(0)
-        self.brake_demand.set(100)
-        self.dcc_direction = None
-        self.update_direction_button_visuals()
-        # Set the video defaults:
-        self.video_screen.delete("video_msg")
-        self.video_screen.itemconfig(self.video_canvas_image_id, image="")
-        self.video_screen.image = None
-        self.show_video_message("Select cab direction (FWD/REV) to start video")
-        # Reset the dials to their default states
-        self.speed_dial.update_dial(0)
-        self.power_dial.update_dial(0)
-        self.brake_dial.update_dial(0)
+    def _on_video_direction(self, direction: bool):
+        # FWD/REV button pressed; update direction and trigger stream source change.
+        self.video_mgr.set_direction(direction)
+        self._update_video_button_visuals()
 
-    def set_controls_disabled_state(self, disabled: bool):
-        state_val = "disabled" if disabled else "normal"
-        self.throttle.configure(state=state_val)
-        self.brake.configure(state=state_val)
-        self.btn_fwd.configure(state=state_val)
-        self.btn_rev.configure(state=state_val)
-        self.btn_estop.configure(state=state_val)
-
-    #----------------------------------------------------------------------------------------------------
-    # Callback Function to update the load mass (and hence the total mass) of the train
-    #----------------------------------------------------------------------------------------------------
-
-    def mass_updated(self):
-        # Defensive parse to avoid transient widget value issues.
-        try:
-            raw_val = self.load_mass_entry.get()
-            self.load_mass = int(raw_val) if raw_val is not None else 0
-        except (ValueError, TypeError):
-            self.load_mass = 0
-        self.total_mass = self.loco_mass + self.load_mass
-        if self.loco_name:
-            self.mass_text_label.configure(text=f"{self.loco_name} ({self.total_mass} Tonnes)")
-
-    #----------------------------------------------------------------------------------------------------
-    # Function to gracefully shut down the audio, video and physics loops on shutdown
-    #----------------------------------------------------------------------------------------------------
-
-    def on_close(self):
-        # 1. Immediately flag running loops to stop re-scheduling themselves
-        self.video_running = False
-        # 2. Cancel physics loops
-        if self.next_physics_loop_event:
-            try: self.after_cancel(self.next_physics_loop_event)
-            except Exception: pass
-            self.next_physics_loop_event = None
-        # 3. Clean up video stream and cancel video loop
-        self.cleanup_video()
-        # 4. Halt audio safely
-        if self.audio_stream:
-            try:
-                self.audio_stream.abort()
-                self.audio_stream.close()
-            except Exception:
-                pass
-            self.audio_stream = None
-
-    #----------------------------------------------------------------------------------------------------
-    # Callback to handle locomotive direction changes (in terms of button states and video feed)
-    #----------------------------------------------------------------------------------------------------
-
-    def set_direction(self, direction):
-        if self.dcc_direction == direction:
-            self.dcc_direction = None
-        else:
-            self.dcc_direction = direction
-            # Speed/Direction messages include the Session ID, Speed value and Direction Flag
-            mqtt_message = {"sessionid": self.session_id, "speed": self.dcc_speed_value, "direction": self.dcc_direction}
-            mqtt_interface.send_mqtt_message("dcc_locomotive_control_commands", 0, data=mqtt_message, retain=True,
-                                log_message=f"Loco Control: Publishing loco control message to broker :{mqtt_message}")
-        self.update_direction_button_visuals()
-
-    def update_direction_button_visuals(self):
-        if self.dcc_direction is True: # FWD
-            self.btn_fwd.configure(bg="#2a7ade", fg="white")
-            self.btn_rev.configure(bg="lightgray", fg="black")
-        elif self.dcc_direction is False: # REV
-            self.btn_fwd.configure(bg="lightgray", fg="black")
-            self.btn_rev.configure(bg="#2a7ade", fg="white")
-        else:
-            self.btn_fwd.configure(bg="lightgray", fg="black")
-            self.btn_rev.configure(bg="lightgray", fg="black")
-
-    #----------------------------------------------------------------------------------------------------
-    # Callback to handle video direction changes (in terms of button states and video feed)
-    #----------------------------------------------------------------------------------------------------
-
-    def set_video_direction(self, direction:bool):
-        if self.video_direction == direction:
-            self.video_direction = None
-        else:
-            self.video_direction = direction
-        self.update_video_button_visuals()
-        self.update_video_stream_source()
-
-    def update_video_button_visuals(self):
-        if self.video_direction is True:  # FWD
+    def _update_video_button_visuals(self):
+        # Update video button states based on current direction.
+        direction = self.video_mgr.video_direction
+        if direction is True:  # FWD
             self.video_btn_fwd.configure(bg="#2a7ade", relief=Tk.SUNKEN)
             self.video_btn_rev.configure(bg="#444444", relief=Tk.RAISED)
-        elif self.video_direction is False:  # REV
+        elif direction is False:  # REV
             self.video_btn_rev.configure(bg="#2a7ade", relief=Tk.SUNKEN)
             self.video_btn_fwd.configure(bg="#444444", relief=Tk.RAISED)
         else:
             self.video_btn_fwd.configure(bg="#444444", relief=Tk.RAISED)
             self.video_btn_rev.configure(bg="#444444", relief=Tk.RAISED)
 
-    #----------------------------------------------------------------------------------------------------
-    # Video connection/disconnection and update functions.
-    #----------------------------------------------------------------------------------------------------
-
-    def set_video_failed(self, message):
-        self.video_status = message
-        self.video_running = False
-
-    def fail_video_from_worker(self, message):
-        self.root_window.after(0, lambda: self.set_video_failed(message))
-
-    def show_video_message(self, text, color="white"):
+    def _show_video_message(self, text: str, color: str = "white"):
+        # Show a message overlay in the video frame (non-blocking).
         self.video_screen.itemconfig(self.video_canvas_image_id, image="")
         self.video_screen.delete("video_msg")
         self.video_screen.create_text(240, 135, text=text, fill=color, font=("Arial", 12), tags="video_msg")
 
-    def async_connect_video(self, url, generation):
-        cap = None
-        try:
-            # Prefer FFmpeg backend for timeout controls
-            cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-            # These may be backend-dependent; harmless if unsupported
-            try: cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 2000)
-            except Exception: pass
-            try: cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 1000)
-            except Exception: pass
-            try: cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            except Exception: pass
-            # If user switched direction/stopped while connecting, discard
-            if generation != self.video_connect_generation or not self.video_running:
-                if cap is not None: cap.release()
-                return
-            if cap is None or not cap.isOpened():
-                self.root_window.after(0, lambda: self.show_video_message("Unable to open video stream", color="red"))
-                if cap is not None: cap.release()
-                return
-            self.root_window.after(0, lambda: self.on_video_connected(cap, generation))
-        except Exception as e:
-            if cap is not None:
-                try: cap.release()
-                except Exception: pass
-            self.root_window.after(0, lambda e=e: self.show_video_message(f"Video connection error: {e}", color="red"))
-            
-    def on_video_connected(self, capture_object, generation):
-        # stale connect result guard + serialised state transition
-        with self.video_state_lock:
-            if generation != self.video_connect_generation or not self.video_running:
-                try: capture_object.release()
-                except Exception: pass
-                return
-            # Ensure previous capture is not left open.
-            if self.video_capture is not None and self.video_capture is not capture_object:
-                try: self.video_capture.release()
-                except Exception: pass
-            self.video_capture = capture_object
-            self.video_status = None
-            with self.video_lock:
-                self.latest_frame = None
-            # Start blocking I/O in background thread using a fixed capture reference.
-            self.video_reader_thread = threading.Thread(target=self.video_reader_loop, args=(capture_object, generation), daemon=True)
-            self.video_reader_thread.start()
-            # Start lightweight UI paint loop (Tk thread only).
-            self.next_video_loop_event = self.root_window.after(30, self.update_video_stream)
-
-    def update_video_stream_source(self):
-        # Global serialisation + debounce to avoid rapid teardown/reopen races in native FFmpeg.
-        with self.video_switch_lock:
-            now = time.monotonic()
-            # Ignore extremely rapid repeats (e.g. double-click/toggle jitter)
-            if now - self.last_video_switch_ts < 0.25:
-                return
-            self.last_video_switch_ts = now
-            # Serialise source switch to prevent overlap with connect/cleanup.
-            with self.video_state_lock:
-                self.video_running = False
-            self.cleanup_video()
-            if self.video_direction is None:
-                self.show_video_message("Select cab direction (FWD/REV) to start video")
-                return
-            target_url = self.fwd_stream_url if self.video_direction is True else self.rev_stream_url
-            direction_name = "Forward" if self.video_direction is True else "Reverse"
-            if not target_url:
-                self.show_video_message(f"No {direction_name.lower()} video stream URL configured", color="orange")
-                return
-            self.show_video_message("Connecting to cab view...", color="orange")
-            with self.video_state_lock:
-                self.video_running = True
-                self.video_connect_generation += 1
-                gen = self.video_connect_generation
-            threading.Thread(target=self.async_connect_video, args=(target_url, gen), daemon=True).start()
-
-    def cleanup_video(self):
-        # Two-phase teardown:
-        # Phase A: under lock, mark state stopped/cancel timers and detach handles.
-        with self.video_state_lock:
-            self.video_running = False
-            self.video_connect_generation += 1  # invalidate any in-flight async connect/readers
-            if self.next_video_loop_event:
-                try: self.after_cancel(self.next_video_loop_event)
-                except Exception: pass
-                self.next_video_loop_event = None
-            t = self.video_reader_thread
-            self.video_reader_thread = None
-            cap = self.video_capture
-            self.video_capture = None
-            self.video_status = None
-            with self.video_lock:
-                self.latest_frame = None
-        # Phase B: outside lock, join/release to avoid lock-related deadlocks.
-        # IMPORTANT: never release cap from this thread if reader may still be in cap.read()
-        # (can crash in native FFmpeg/OpenCV).
-        reader_alive = False
-        if t and t.is_alive():
-            try:
-                t.join(timeout=1.5)
-            except Exception:
-                pass
-            reader_alive = t.is_alive()
-        if cap and not reader_alive:
-            try:
-                cap.release()
-            except Exception:
-                pass
-        # Clear canvas layers safely (persistent image item + message tag).
-        try:
-            self.video_screen.delete("video_msg")
-            self.video_screen.itemconfig(self.video_canvas_image_id, image="")
-            self.video_screen.image = None
-        except Exception:
-            pass
-
-    def video_reader_loop(self, cap, generation):
-        fail_count = 0
-        try:
-            while self.video_running and generation == self.video_connect_generation:
-                try:
-                    # This can block; runs off Tk thread.
-                    ret, frame = cap.read()
-                    # Abort if this reader is stale or stream no longer active.
-                    if generation != self.video_connect_generation or not self.video_running:
-                        break
-                    if not ret or frame is None:
-                        fail_count += 1
-                        if fail_count >= 3:
-                            self.fail_video_from_worker("Video stream lost")
-                            break
-                        time.sleep(0.05)
-                        continue
-                    fail_count = 0
-                    frame = cv2.resize(frame, (480, 270))
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    # Apply brightness and contrast adjustments
-                    # Convert to float for processing
-                    frame_float = frame.astype(numpy.float32) / 255.0
-                    # Apply contrast: output = contrast * (input - 0.5) + 0.5
-                    frame_float = self.stream_contrast * (frame_float - 0.5) + 0.5
-                    # Apply brightness: output = input + (brightness / 100)
-                    # Brightness range is -100 to +100, normalize to -1.0 to +1.0
-                    brightness_factor = self.stream_brightness / 100.0
-                    frame_float = frame_float + brightness_factor
-                    # Clamp values to valid range [0, 1]
-                    frame_float = numpy.clip(frame_float, 0.0, 1.0)
-                    # Convert back to uint8
-                    frame = (frame_float * 255).astype(numpy.uint8)
-                    with self.video_lock:
-                        self.latest_frame = frame
-                except Exception as e:
-                    logging.warning(f"Video reader error: {e}")
-                    self.fail_video_from_worker("Video stream error")
-                    break
-        finally:
-            # Reader thread owns final release of the capture it was given.
-            try:
-                cap.release()
-            except Exception:
-                pass
-            
-    # ----------------------------------------------------------------------------------------------------
-    # This is now a UI paint loop only (non-blocking)
-    # ----------------------------------------------------------------------------------------------------
-
     def update_video_stream(self):
-        # If stream stopped, show status quickly and exit
-        if not self.video_running:
-            if self.video_status:
-                self.show_video_message(self.video_status, color="red")
-            return
-        frame = None
-        with self.video_lock:
-            if self.latest_frame is not None:
-                frame = self.latest_frame.copy()
-                self.latest_frame = None
-        if frame is not None:
-            img = Image.fromarray(frame)
-            img_tk = ImageTk.PhotoImage(image=img)
-            try:
-                self.video_screen.delete("video_msg")
-                self.video_screen.itemconfig(self.video_canvas_image_id, image=img_tk)
-                self.video_screen.image = img_tk  # keep reference alive
-            except Exception as e:
-                logging.warning(f"Failed to update video canvas: {e}")
-                self.video_status = "Video render error"
-                self.video_running = False
-                self.show_video_message(self.video_status, color="red")
-                return
+        # UI paint loop for video (called every 30ms).
+        # Non-blocking: drains queues, paints frame if available, reschedules itself.
+        img_tk = self.video_mgr.ui_update_loop()
+        # Paint the frame if one was returned
+        if img_tk is not None:
+            self.video_screen.delete("video_msg")
+            self.video_screen.itemconfig(self.video_canvas_image_id, image=img_tk)
+            self.current_video_image = img_tk  # Hold reference to prevent garbage collection
+        # Reschedule for 30ms later
         self.next_video_loop_event = self.root_window.after(30, self.update_video_stream)
 
     #----------------------------------------------------------------------------------------------------
-    # Callback to handle Loco Emergency Stop
-    #----------------------------------------------------------------------------------------------------
-
-    def trigger_emergency_stop(self):
-        # Speed/Direction messages include the Session ID, Speed value and Direction Flag
-        mqtt_message = {"sessionid": self.session_id, "speed": 1, "direction": self.dcc_direction}
-        mqtt_interface.send_mqtt_message("dcc_locomotive_control_commands", 0, data=mqtt_message, retain=True,
-                            log_message=f"Loco Control: Publishing loco control message to broker :{mqtt_message}")
-        self.reset_to_defaults()
-
-    #----------------------------------------------------------------------------------------------------
-    # API FUNCTION to "set" a new loco
+    # LOCOMOTIVE PARAMETER UPDATE API METHOD - Called when a new locomotive is selected.
+    # Stops current video, resets state, and configures new loco parameters.
     #----------------------------------------------------------------------------------------------------
 
     def update_parameters(self, loco_name:str, dcc_address:int, loco_mass_tonnes:int, loco_max_speed_mph:int, max_tractive_effort_lbf:int, 
                         traction_responsiveness:float, brake_responsiveness:float, dcc_speed_scaling:float, axle_offsets_ft:list,
                         fwd_stream_url:str, rev_stream_url:str, loco_horsepower:int, stream_brightness:int, stream_contrast:float):
-        self.cleanup_video()
-        # Cancel any existing physics loop
+        # Stop video cleanly
+        self.video_mgr.cleanup()
+        # Cancel physics loop
         if self.next_physics_loop_event:
             try: self.root_window.after_cancel(self.next_physics_loop_event)
             except Exception: pass
             self.next_physics_loop_event = None
-        # ON SET LOCO: Reset all variables, dials to default, and ensure controls are enabled
+        # Reset UI to defaults
         self.reset_to_defaults()
         self.set_controls_disabled_state(disabled=False)
-        # Bind incoming database attributes
+        # Bind loco parameters
         self.loco_name = loco_name
         self.dcc_address = dcc_address
         self.dcc_speed_scaling = float(dcc_speed_scaling)
@@ -607,16 +649,11 @@ class complex_throttle(Tk.LabelFrame):
         self.traction_responsiveness = traction_responsiveness
         self.brake_responsiveness = brake_responsiveness
         self.axle_offsets = axle_offsets_ft
-        # Store brightness and contrast settings
-        self.stream_brightness = int(stream_brightness)
-        self.stream_contrast = float(stream_contrast)
-        # Update the video stream source
-        self.fwd_stream_url = (fwd_stream_url or "").strip()
-        self.rev_stream_url = (rev_stream_url or "").strip()
-        self.update_video_stream_source()
-        # --- Recalibrate the physical speed dial indicator max bounds ---
-        self.speed_dial.recalibrate(new_max_val=self.loco_max_speed)
-        # Safely pull and update tracking mass data strings
+        # Update video stream URLs and adjustments
+        self.video_mgr.set_stream_urls(fwd_stream_url, rev_stream_url)
+        self.video_mgr.set_stream_adjustments(stream_brightness, stream_contrast)
+        self.next_video_loop_event = self.root_window.after(30, self.update_video_stream)
+        # Load mass from entry
         try:
             entry_val = self.load_mass_entry.get()
             self.load_mass = int(entry_val) if entry_val is not None else 0
@@ -624,8 +661,104 @@ class complex_throttle(Tk.LabelFrame):
             self.load_mass = 0
         self.total_mass = self.loco_mass + self.load_mass
         self.mass_text_label.configure(text=f"{self.loco_name} ({self.total_mass} Tonnes)")
-        # Begin cyclic physics computation loop (10Hz updates)
+        # Recalibrate speed dial
+        self.speed_dial.recalibrate(new_max_val=self.loco_max_speed)
+        # Start physics loop
         self.next_physics_loop_event = self.root_window.after(100, self.update_physics)
+
+    def on_close(self):
+        # Graceful shutdown: stop all loops and clean resources.
+        # Flag loops to stop
+        if self.next_physics_loop_event:
+            try: self.root_window.after_cancel(self.next_physics_loop_event)
+            except Exception: pass
+        if self.next_video_loop_event:
+            try: self.root_window.after_cancel(self.next_video_loop_event)
+            except Exception: pass
+        # Clean video manager
+        self.video_mgr.cleanup()
+        # Clean audio
+        if self.audio_stream:
+            try:
+                self.audio_stream.abort()
+                self.audio_stream.close()
+            except Exception:
+                pass
+            self.audio_stream = None
+
+    #----------------------------------------------------------------------------------------------------
+    # OTHER METHODS
+    #----------------------------------------------------------------------------------------------------
+
+    def reset_to_defaults(self):
+        # Reset all dials and state to defaults.
+        self.target_throttle = 0.0
+        self.target_brake = 0.0
+        self.actual_power = 0.0
+        self.actual_brake = 0.0
+        self.current_speed = 0.0
+        self.iterations = 0
+        self.track_distance = 0.0
+        if hasattr(self, 'pending_clacks'): self.pending_clacks.clear()
+        if hasattr(self, 'active_clacks'): self.active_clacks.clear()
+        self.throttle_demand.set(0)
+        self.brake_demand.set(100)
+        self.dcc_direction = None
+        self._update_direction_button_visuals()
+        self._show_video_message("Select cab direction (FWD/REV) to start video")
+        self.speed_dial.update_dial(0)
+        self.power_dial.update_dial(0)
+        self.brake_dial.update_dial(0)
+
+    def _update_direction_button_visuals(self):
+        # Update main direction button states.
+        if self.dcc_direction is True:
+            self.btn_fwd.configure(bg="#2a7ade", fg="white")
+            self.btn_rev.configure(bg="lightgray", fg="black")
+        elif self.dcc_direction is False:
+            self.btn_fwd.configure(bg="lightgray", fg="black")
+            self.btn_rev.configure(bg="#2a7ade", fg="white")
+        else:
+            self.btn_fwd.configure(bg="lightgray", fg="black")
+            self.btn_rev.configure(bg="lightgray", fg="black")
+
+    def set_direction(self, direction):
+        # Main locomotive direction control.
+        if self.dcc_direction == direction:
+            self.dcc_direction = None
+        else:
+            self.dcc_direction = direction
+            mqtt_message = {"sessionid": self.session_id, "speed": self.dcc_speed_value, "direction": self.dcc_direction}
+            mqtt_interface.send_mqtt_message("dcc_locomotive_control_commands", 0, data=mqtt_message, retain=False,
+                                log_message=f"Loco Control: Publishing loco control message to broker :{mqtt_message}")
+        self._update_direction_button_visuals()
+
+    def set_controls_disabled_state(self, disabled: bool):
+        # Enable/disable all control widgets.
+        state_val = "disabled" if disabled else "normal"
+        self.throttle.configure(state=state_val)
+        self.brake.configure(state=state_val)
+        self.btn_fwd.configure(state=state_val)
+        self.btn_rev.configure(state=state_val)
+        self.btn_estop.configure(state=state_val)
+
+    def mass_updated(self):
+        # Callback: load mass changed.
+        try:
+            raw_val = self.load_mass_entry.get()
+            self.load_mass = int(raw_val) if raw_val is not None else 0
+        except (ValueError, TypeError):
+            self.load_mass = 0
+        self.total_mass = self.loco_mass + self.load_mass
+        if self.loco_name:
+            self.mass_text_label.configure(text=f"{self.loco_name} ({self.total_mass} Tonnes)")
+
+    def trigger_emergency_stop(self):
+        # Emergency stop button.
+        mqtt_message = {"sessionid": self.session_id, "speed": 1, "direction": self.dcc_direction}
+        mqtt_interface.send_mqtt_message("dcc_locomotive_control_commands", 0, data=mqtt_message, retain=False,
+                            log_message=f"Loco Control: Publishing loco control message to broker :{mqtt_message}")
+        self.reset_to_defaults()
 
     #----------------------------------------------------------------------------------------------------
     # API FUNCTION to enable/disable audio
@@ -802,7 +935,8 @@ class complex_throttle(Tk.LabelFrame):
         if self.dcc_speed_value != old_dcc_speed_value:
             # Speed/Direction messages include the Session ID, Speed value and Direction Flag
             mqtt_message = {"sessionid": self.session_id, "speed": self.dcc_speed_value, "direction": self.dcc_direction}
-            mqtt_interface.send_mqtt_message("dcc_locomotive_control_commands", 0, data=mqtt_message, retain=True, log_message=f"Loco Control: Publishing loco control message to broker :{mqtt_message}")
+            mqtt_interface.send_mqtt_message("dcc_locomotive_control_commands", 0, data=mqtt_message, retain=False,
+                            log_message=f"Loco Control: Publishing loco control message to broker :{mqtt_message}")
         # Terminal Log Reporting (Outputs roughly once per second)
         self.iterations += 1
         if self.iterations % 10 == 0:

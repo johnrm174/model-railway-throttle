@@ -86,24 +86,6 @@ class ESPHomeYaml:
         elif "networks" in self.data["wifi"]:
             del self.data["wifi"]["networks"]
 
-    @property
-    def device_name(self):
-        return self.data.get("esphome", {}).get("name", "")
-
-    @device_name.setter
-    def device_name(self, value):
-        self.data.setdefault("esphome", {})
-        self.data["esphome"]["name"] = value
-
-    @property
-    def friendly_name(self):
-        return self.data.get("esphome", {}).get("friendly_name", "")
-
-    @friendly_name.setter
-    def friendly_name(self, value):
-        self.data.setdefault("esphome", {})
-        self.data["esphome"]["friendly_name"] = value
-
     #-----------------------------
     # Camera properties
     #-----------------------------
@@ -276,6 +258,7 @@ class grid_of_wifi_networks(Tk.Frame):
     def delete_row(self, row_frame):
         if len(self.list_of_subframes) > 1:  # Always keep at least one row
             row_frame.destroy()
+            self.list_of_subframes.pop()
 
     def set_values(self, values_to_set: list):
         # Destroy existing subframes
@@ -668,15 +651,8 @@ class CameraConfigUtility(Tk.Toplevel):
             return False
         # Validate other fields
         for widget in self.entries.values():
-            # Preferred path: widget supplies explicit is_valid().
-            if hasattr(widget, "is_valid") and callable(widget.is_valid):
-                try:
-                    if not bool(widget.is_valid):
-                        return False
-                except Exception:
-                    return False
             # Compatibility path: trigger widget internal update hook.
-            elif hasattr(widget, "validate") and callable(widget.validate):
+            if hasattr(widget, "validate") and callable(widget.validate):
                 try:
                     if not widget.validate():
                         return False
@@ -761,14 +737,14 @@ class CameraConfigUtility(Tk.Toplevel):
         if self.yaml.filename is None:
             fd, tempname = tempfile.mkstemp(suffix=".yaml", prefix="esphome_")
             os.close(fd)
+            config_path = tempname
+            self.temp_flash_config_path = tempname
             try:
                 self.yaml.save(tempname)
             except Exception as ex:
                 self.cleanup_temp_flash_file()
                 messagebox.showerror("Save Failed", str(ex), parent=self)
                 return
-            config_path = tempname
-            self.temp_flash_config_path = tempname
         else:
             config_path = self.yaml.filename
             self.temp_flash_config_path = None

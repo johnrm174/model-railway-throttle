@@ -142,16 +142,18 @@ class LocoConfigWindow(Tk.Toplevel):
         Tk.Label(slider_container, text="Brightness:", anchor="w").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
         self.stream_brightness_var = Tk.IntVar(value=int(current_config.get("stream_brightness", 0)))
         self.stream_brightness_scale = Tk.Scale(slider_container, from_=-100, to=100, orient=Tk.HORIZONTAL,
-                                        resolution=1, showvalue=0, variable=self.stream_brightness_var, length=220)
+                    command=self.on_brightness_update, resolution=1, showvalue=0, variable=self.stream_brightness_var, length=220)
         self.stream_brightness_scale.grid(row=0, column=1, sticky="ew", pady=4)
         self.entries["stream_brightness"] = self.stream_brightness_scale
         Tk.Label(slider_container, text="Contrast:", anchor="w").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
         self.stream_contrast_var = Tk.DoubleVar(value=float(current_config.get("stream_contrast", 1.0)))
         self.stream_contrast_scale = Tk.Scale(slider_container, from_=0.5, to=2.0, orient=Tk.HORIZONTAL,
-                                        resolution=0.05, showvalue=0, variable=self.stream_contrast_var, length=220)
+                    command=self.on_contrast_update,resolution=0.05, showvalue=0, variable=self.stream_contrast_var, length=220)
         self.stream_contrast_scale.grid(row=1, column=1, sticky="ew", pady=4)
         self.entries["stream_contrast"] = self.stream_contrast_scale
-        slider_container.columnconfigure(1, weight=1)        
+        slider_container.columnconfigure(1, weight=1)
+        self.brightness = float(self.stream_brightness_var.get())
+        self.contrast = float(self.stream_contrast_var.get())
         # Ensure comboboxes always have baseline options even before/without discovery.
         self.update_camera_dropdown_values()
         # Run initial discovery scan immediately
@@ -248,13 +250,13 @@ class LocoConfigWindow(Tk.Toplevel):
             #  Wait longer for async callbacks to fire (3 seconds)
             time.sleep(3.0)
         except Exception as e:
-            logging.Error(f"[Discovery] Error during scan: {e}")
+            logging.error(f"[Discovery] Error during scan: {e}")
         finally:
             try:
                 if zeroconf is not None:
                     zeroconf.close()
             except Exception as e:
-                logging.Error(f"[Discovery] Error closing Zeroconf: {e}")
+                logging.error(f"[Discovery] Error closing Zeroconf: {e}")
             self.scan_in_progress = False
     
     def register_discovered_camera(self, name, url):
@@ -266,6 +268,7 @@ class LocoConfigWindow(Tk.Toplevel):
             self.after(0, self.update_camera_dropdown_values)            
             
     def update_camera_dropdown_values(self):
+        ##############################################################NEED MORE PROTECTION HERE ########################################
         # FIXED: Check if widgets still exist
         if not hasattr(self, 'entries'):
             return
@@ -360,6 +363,12 @@ class LocoConfigWindow(Tk.Toplevel):
             # User typed something that's not a URL - maybe incomplete
             self.set_last_preview_selection("Custom / Manual (incomplete)", typed_text)
             
+    def on_contrast_update(self, contrast):
+        self.contrast = float(contrast)
+
+    def on_brightness_update(self, brightness):
+        self.brightness = float(brightness)
+            
     def start_preview_stream(self, url):
         self.stop_preview_stream(wait=True)
         self.status_label.config(text="Connecting to stream...", fg="orange")
@@ -386,14 +395,6 @@ class LocoConfigWindow(Tk.Toplevel):
             except Exception: pass
             return
         while self.preview_thread_running and generation == self.preview_generation and url == self.current_preview_url:
-            try:
-                brightness = float(self.stream_brightness_var.get())
-            except Exception:
-                brightness = 0.0
-            try:
-                contrast = float(self.stream_contrast_var.get())
-            except Exception:
-                contrast = 1.0
             ret, frame = cap.read()
             if not ret:
                 self.after(0, lambda g=generation, t=token:
@@ -401,7 +402,7 @@ class LocoConfigWindow(Tk.Toplevel):
                 break
             self.after(0, lambda g=generation, t=token:
                 self.safe_preview_status("Streaming Active", "green", g, t))
-            frame = cv2.convertScaleAbs(frame, alpha=contrast, beta=brightness)
+            frame = cv2.convertScaleAbs(frame, alpha=self.contrast, beta=self.brightness)
             frame = cv2.resize(frame, (320, 240))
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             img_tk = ImageTk.PhotoImage(image=Image.fromarray(frame))
