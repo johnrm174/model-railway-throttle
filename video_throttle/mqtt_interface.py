@@ -651,10 +651,11 @@ def subscribe_to_mqtt_messages (message_type:str,item_node:str,item_id:int,callb
     elif node_config["enhanced_debugging"]: logging.debug("MQTT-Client: Adding subscription topic '"+topic+"'")
     # Add to the list of subscribed topics (so we can re-subscribe on reconnection)
     with node_config_thread_lock:
-        if topic not in node_config["list_of_subscribed_topics"]:
-            node_config["list_of_subscribed_topics"].append(topic)
-        # Save the callback details for when we receive a message on the topic
-        node_config["callbacks"][topic] = callback
+        subscribed_topics = node_config["list_of_subscribed_topics"]
+        if topic not in subscribed_topics:
+            subscribed_topics.append(topic)
+        callbacks = node_config["callbacks"]
+        callbacks[topic] = callback
     return()
 
 #-----------------------------------------------------------------------------------------------
@@ -702,11 +703,7 @@ def unsubscribe_from_message_type(message_type:str):
     # Finally, remove all instances of the message type from the internal subscriptions list
     # Note we don't iterate through the list to remove items as it will change under us
     topics_to_unsubscribe = []
-    enhanced_debugging = False
-    connected_to_broker = False
     with node_config_thread_lock:
-        enhanced_debugging = node_config["enhanced_debugging"]
-        connected_to_broker = node_config["connected_to_broker"]
         new_list_of_subscribed_topics = []
         for subscribed_topic in node_config["list_of_subscribed_topics"]:
             if subscribed_topic.startswith(message_type):
@@ -716,6 +713,9 @@ def unsubscribe_from_message_type(message_type:str):
                 new_list_of_subscribed_topics.append(subscribed_topic)
         node_config["list_of_subscribed_topics"] = new_list_of_subscribed_topics
     for subscribed_topic in topics_to_unsubscribe:
+        with node_config_thread_lock:
+            enhanced_debugging = node_config["enhanced_debugging"]
+            connected_to_broker = node_config["connected_to_broker"]
         if enhanced_debugging:
             logging.debug("MQTT-Client: Unsubscribing from topic '"+subscribed_topic+"'")
         # Only unsubscribe if connected to the broker(if the client is disconnected

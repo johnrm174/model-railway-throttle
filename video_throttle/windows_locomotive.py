@@ -476,21 +476,22 @@ class LocoConfigWindow(Tk.Toplevel):
             pass
         except Exception:
             return
-        retained_messages = []
+        saw_stop = False
         try:
             while True:
                 queued_message = control_queue.get_nowait()
                 if queued_message == "stop":
-                    retained_messages.append(queued_message)
+                    saw_stop = True
         except queue.Empty:
             pass
         except Exception:
             return
-        for queued_message in retained_messages:
+        if saw_stop:
             try:
-                control_queue.put_nowait(queued_message)
+                control_queue.put_nowait("stop")
             except Exception:
-                return
+                pass
+            return
         try:
             control_queue.put_nowait(message)
         except Exception:
