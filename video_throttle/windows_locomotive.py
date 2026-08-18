@@ -480,9 +480,8 @@ class LocoConfigWindow(Tk.Toplevel):
         try:
             while True:
                 queued_message = control_queue.get_nowait()
-                if queued_message != "stop":
-                    continue
-                retained_messages.append(queued_message)
+                if queued_message == "stop":
+                    retained_messages.append(queued_message)
         except queue.Empty:
             pass
         except Exception:
