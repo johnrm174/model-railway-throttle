@@ -335,11 +335,17 @@ class VideoStreamManager:
         # Synchronously stop the current reader process and drain queues.
         p = None
         ev = None
+        fq = None
+        sq = None
         with self.state_lock:
             p = self.video_reader_process
             ev = self.video_reader_stop_event
+            fq = self.video_frame_queue
+            sq = self.video_status_queue
             self.video_reader_process = None
             self.video_reader_stop_event = None
+            self.video_frame_queue = None
+            self.video_status_queue = None
         if p is None:
             return
         # Signal stop
@@ -364,13 +370,10 @@ class VideoStreamManager:
             except Exception:
                 pass
         # Drain queues off Tk thread to avoid blocking
-        threading.Thread(target=self._drain_queues, daemon=True).start()
+        threading.Thread(target=self._drain_queues, args=(fq, sq), daemon=True).start()
 
-    def _drain_queues(self):
+    def _drain_queues(self, fq, sq):
         # Non-blocking queue drain (safe to call from background thread)
-        with self.state_lock:
-            fq = self.video_frame_queue
-            sq = self.video_status_queue
         try:
             if fq is not None:
                 while True:

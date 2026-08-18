@@ -403,10 +403,15 @@ def process_message(topic, payload):
             # Make the callback (that was registered when the calling programme subscribed to the feed)
             # Note that we also need to test to see if the the topic is a partial match to cover the
             # case of subscribing to all subtopics for an specified item (with the '+' wildcard)
-            if topic in node_config["callbacks"]:
-                node_config["callbacks"][topic] (unpacked_json)
-            elif topic.rpartition('/')[0]+"/+" in node_config["callbacks"]:
-                node_config["callbacks"][topic.rpartition('/')[0]+"/+"] (unpacked_json)
+            callback = None
+            wildcard_topic = topic.rpartition('/')[0]+"/+"
+            with node_config_thread_lock:
+                if topic in node_config["callbacks"]:
+                    callback = node_config["callbacks"][topic]
+                elif wildcard_topic in node_config["callbacks"]:
+                    callback = node_config["callbacks"][wildcard_topic]
+            if callback is not None:
+                callback(unpacked_json)
             else:
                 logging.warning("MQTT-Client: unhandled message topic: "+str(topic))
     return()
@@ -648,8 +653,8 @@ def subscribe_to_mqtt_messages (message_type:str,item_node:str,item_id:int,callb
     with node_config_thread_lock:
         if topic not in node_config["list_of_subscribed_topics"]:
             node_config["list_of_subscribed_topics"].append(topic)
-    # Save the callback details for when we receive a message on the topic
-    node_config["callbacks"][topic] = callback
+        # Save the callback details for when we receive a message on the topic
+        node_config["callbacks"][topic] = callback
     return()
 
 #-----------------------------------------------------------------------------------------------
@@ -696,17 +701,23 @@ def unsubscribe_from_message_type(message_type:str):
     # Topic format: "<Message-Type>/<Network-ID>/<Item_Identifier>/<optional-subtopic>"
     # Finally, remove all instances of the message type from the internal subscriptions list
     # Note we don't iterate through the list to remove items as it will change under us
-    new_list_of_subscribed_topics = []
-    for subscribed_topic in node_config["list_of_subscribed_topics"]:
-        if subscribed_topic.startswith(message_type):
-            if node_config["enhanced_debugging"]:
-                logging.debug("MQTT-Client: Unsubscribing from topic '"+subscribed_topic+"'")
-            # Only unsubscribe if connected to the broker(if the client is disconnected
-            # from the broker then all subscriptions will already have been terminated)
-            if node_config["connected_to_broker"]: mqtt_client.unsubscribe(subscribed_topic)
-        else:
-            new_list_of_subscribed_topics.append(subscribed_topic)
-    node_config["list_of_subscribed_topics"] = new_list_of_subscribed_topics
+    topics_to_unsubscribe = []
+    with node_config_thread_lock:
+        new_list_of_subscribed_topics = []
+        for subscribed_topic in node_config["list_of_subscribed_topics"]:
+            if subscribed_topic.startswith(message_type):
+                topics_to_unsubscribe.append(subscribed_topic)
+                node_config["callbacks"].pop(subscribed_topic, None)
+            else:
+                new_list_of_subscribed_topics.append(subscribed_topic)
+        node_config["list_of_subscribed_topics"] = new_list_of_subscribed_topics
+    for subscribed_topic in topics_to_unsubscribe:
+        if node_config["enhanced_debugging"]:
+            logging.debug("MQTT-Client: Unsubscribing from topic '"+subscribed_topic+"'")
+        # Only unsubscribe if connected to the broker(if the client is disconnected
+        # from the broker then all subscriptions will already have been terminated)
+        if node_config["connected_to_broker"]:
+            mqtt_client.unsubscribe(subscribed_topic)
     return()
 
 ##################################################################################################################

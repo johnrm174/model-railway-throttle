@@ -15,6 +15,65 @@ from .widgets import integer_entry_box, float_entry_box, string_entry_box, axle_
 from .widgets import ConfigControlBar
 
 #----------------------------------------------------------------------------------------------------
+# Spawn-safe preview worker
+#----------------------------------------------------------------------------------------------------
+
+def preview_worker_process(url, frame_queue, control_queue, brightness, contrast):
+    cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+    try:
+        try:
+            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 1200)
+        except Exception:
+            pass
+        try:
+            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 400)
+        except Exception:
+            pass
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
+        if cap is None or not cap.isOpened():
+            frame_queue.put(("status", "Unable to open stream", "red"))
+            return
+        frame_queue.put(("status", "Streaming Active", "green"))
+        brightness = float(brightness)
+        contrast = float(contrast)
+        while True:
+            while True:
+                try:
+                    cmd = control_queue.get_nowait()
+                except queue.Empty:
+                    break
+                except Exception:
+                    break
+                if cmd == "stop":
+                    return
+                if isinstance(cmd, tuple) and len(cmd) == 3 and cmd[0] == "settings":
+                    _, brightness, contrast = cmd
+                    brightness = float(brightness)
+                    contrast = float(contrast)
+            ret, frame = cap.read()
+            if not ret:
+                frame_queue.put(("status", "Stream disconnected or unavailable", "red"))
+                break
+            frame = cv2.convertScaleAbs(frame, alpha=contrast, beta=brightness)
+            frame = cv2.resize(frame, (320, 240))
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            ok, encoded = cv2.imencode(".png", frame)
+            if not ok:
+                continue
+            try:
+                frame_queue.put(("frame", encoded.tobytes()), timeout=0.2)
+            except Exception:
+                break
+    finally:
+        try:
+            cap.release()
+        except Exception:
+            pass
+
+#----------------------------------------------------------------------------------------------------
 # Loco Config Window
 #----------------------------------------------------------------------------------------------------
 
@@ -340,56 +399,6 @@ class LocoConfigWindow(Tk.Toplevel):
     # Preview Handler
     # -------------------------------------------------------------------------
 
-    def _preview_worker_process(self, url, frame_queue, control_queue):
-        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-        try:
-            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 1200)
-        except Exception:
-            pass
-        try:
-            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 400)
-        except Exception:
-            pass
-        try:
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        except Exception:
-            pass
-        if cap is None or not cap.isOpened():
-            frame_queue.put(("status", "Unable to open stream", "red"))
-            try:
-                cap.release()
-            except Exception:
-                pass
-            return
-        frame_queue.put(("status", "Streaming Active", "green"))
-        while True:
-            try:
-                cmd = control_queue.get_nowait()
-                if cmd == "stop":
-                    break
-            except queue.Empty:
-                pass
-            except Exception:
-                break
-            ret, frame = cap.read()
-            if not ret:
-                frame_queue.put(("status", "Stream disconnected or unavailable", "red"))
-                break
-            frame = cv2.convertScaleAbs(frame, alpha=self.contrast, beta=self.brightness)
-            frame = cv2.resize(frame, (320, 240))
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            ok, encoded = cv2.imencode(".png", frame)
-            if not ok:
-                continue
-            try:
-                frame_queue.put(("frame", encoded.tobytes()), timeout=0.2)
-            except Exception:
-                break
-        try:
-            cap.release()
-        except Exception:
-            pass
-        
     def set_last_preview_selection(self, label, url):
         self.last_preview_selection_label = label if label else "None"
         self.last_preview_selection_url = url.strip() if isinstance(url, str) else ""
@@ -447,10 +456,47 @@ class LocoConfigWindow(Tk.Toplevel):
             
     def on_contrast_update(self, contrast):
         self.contrast = float(contrast)
-
+        self.send_preview_settings_update()
+ 
     def on_brightness_update(self, brightness):
         self.brightness = float(brightness)
-            
+        self.send_preview_settings_update()
+
+    def send_preview_settings_update(self):
+        if not getattr(self, "preview_worker_alive", False):
+            return
+        control_queue = getattr(self, "preview_control_queue", None)
+        if control_queue is None:
+            return
+        message = ("settings", float(self.brightness), float(self.contrast))
+        try:
+            control_queue.put_nowait(message)
+            return
+        except queue.Full:
+            pass
+        except Exception:
+            return
+        retained_messages = []
+        try:
+            while True:
+                queued_message = control_queue.get_nowait()
+                if queued_message != "stop":
+                    continue
+                retained_messages.append(queued_message)
+        except queue.Empty:
+            pass
+        except Exception:
+            return
+        for queued_message in retained_messages:
+            try:
+                control_queue.put_nowait(queued_message)
+            except Exception:
+                return
+        try:
+            control_queue.put_nowait(message)
+        except Exception:
+            pass
+             
     def start_preview_stream(self, url):
         self.stop_preview_stream(wait=True)
         self.status_label.config(text="Connecting to stream...", fg="orange")
@@ -463,8 +509,9 @@ class LocoConfigWindow(Tk.Toplevel):
         self.preview_last_frame_at = time.monotonic()
         self.preview_watchdog_ms = 5000
         self.preview_process = mp.Process(
-            target=self._preview_worker_process,
-            args=(url, self.preview_frame_queue, self.preview_control_queue),
+            target=preview_worker_process,
+            args=(url, self.preview_frame_queue, self.preview_control_queue,
+                  float(self.brightness), float(self.contrast)),
             daemon=True)
         self.preview_process.start()
         self.after(50, self.poll_preview_queue)
