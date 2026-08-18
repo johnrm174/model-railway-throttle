@@ -178,10 +178,11 @@ class remote_dcc_throttle(Tk.LabelFrame):
         mqtt_message = {"requestdccpower": True}
         mqtt_interface.send_mqtt_message("dcc_locomotive_control_commands", 0, data=mqtt_message, retain=True,
                 log_message=f"Loco Control: Publishing loco control message to broker :{mqtt_message}")
-        # Schedule a timeout check to generate an error message if we don't get a response within 5 seconds
-        self.track_power_timeout_id = self.root_window.after(3000, lambda: messagebox.showerror("Timeout Error", "Track Power request timeout"))
-        
-    def request_track_power_off(self):
+        # Schedule a timeout check to generate an error message if we don't get a response within 3 seconds
+        def _on_power_on_timeout():
+            self.track_power_timeout_id = None
+            messagebox.showerror("Timeout Error", "Track Power request timeout")
+        self.track_power_timeout_id = self.root_window.after(3000, _on_power_on_timeout)
         # Cancel any pending timeout messages
         if self.track_power_timeout_id:
             self.root_window.after_cancel(self.track_power_timeout_id)
@@ -190,8 +191,11 @@ class remote_dcc_throttle(Tk.LabelFrame):
         mqtt_message = {"requestdccpower": False}
         mqtt_interface.send_mqtt_message("dcc_locomotive_control_commands", 0, data=mqtt_message, retain=True,
                 log_message=f"Loco Control: Publishing loco control message to broker :{mqtt_message}")
-        # Schedule a timeout check to generate an error message if we don't get a response within 5 seconds
-        self.track_power_timeout_id = self.root_window.after(3000, lambda: messagebox.showerror("Timeout Error", "Track Power request timeout"))
+        # Schedule a timeout check to generate an error message if we don't get a response within 3 seconds
+        def _on_power_off_timeout():
+            self.track_power_timeout_id = None
+            messagebox.showerror("Timeout Error", "Track Power request timeout")
+        self.track_power_timeout_id = self.root_window.after(3000, _on_power_off_timeout)
 
     #----------------------------------------------------------------------------------------------------
     # State Synchronization & UI Interlock Management
@@ -271,7 +275,6 @@ class remote_dcc_throttle(Tk.LabelFrame):
                 logging.debug(f"Loco Control: Received session acknowledgement from {source_node}: "
                                    +f"DCC Address {dcc_address}, Session ID is {session_id}")
                 self.session_response_received(session_id)
-                self.session_requested = False
 
     #----------------------------------------------------------------------------------------------------
     # Function to gracefully shut down on window close

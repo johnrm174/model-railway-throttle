@@ -123,6 +123,9 @@ node_config["list_of_published_topics"] = []
 node_config["list_of_subscribed_topics"] = []
 node_config["callbacks"] = {}
 
+# Lock to protect concurrent access to list_of_subscribed_topics and callbacks
+_subscriptions_lock = threading.Lock()
+
 #-----------------------------------------------------------------------------------------------
 # The MQTT client is held globally:
 #-----------------------------------------------------------------------------------------------
@@ -223,7 +226,7 @@ threading.Thread(target=mqtt_publish_thread, daemon=True).start()
 #-----------------------------------------------------------------------------------------------
 # Internal function to send out a heartbeat message from the node and then schedule a
 # subsequent call to the function (according to the 'heartbeat_frequency') via the
-# root.after method.Initially called by the 'on_connect' function.
+# root.after method. Initially called by the 'on_connect' function.
 #-----------------------------------------------------------------------------------------------
 
 def publish_heartbeat_message():
@@ -313,10 +316,11 @@ def on_connect(mqtt_client, userdata, flags, rc):
         # all client connection information from the broker (including knowledge of the topics we have
         # subscribed to) - we therefore need to re-subscribe to all topics with this new connection
         # Note that this means we will immediately receive all retained messages for those topics
-        if len(node_config["list_of_subscribed_topics"]) > 0:
-            for topic in node_config["list_of_subscribed_topics"]:
-                if node_config["enhanced_debugging"]: logging.debug("MQTT-Client: Subscribing to '"+topic+"' from Broker")
-                mqtt_client.subscribe(topic)
+        with _subscriptions_lock:
+            topics_to_restore = list(node_config["list_of_subscribed_topics"])
+        for topic in topics_to_restore:
+            if node_config["enhanced_debugging"]: logging.debug("MQTT-Client: Subscribing to '"+topic+"' from Broker")
+            mqtt_client.subscribe(topic)
         # Re subscribe to all heartbeat and shutdown messages on the specified network
         # Topic format for these messages is: "<Message-Type>/<Network-ID>"
         heartbeat_topic = "heartbeat"+"/"+node_config["network_identifier"]
@@ -636,10 +640,11 @@ def subscribe_to_mqtt_messages (message_type:str,item_node:str,item_id:int,callb
         mqtt_client.subscribe(topic)
     elif node_config["enhanced_debugging"]: logging.debug("MQTT-Client: Adding subscription topic '"+topic+"'")
     # Add to the list of subscribed topics (so we can re-subscribe on reconnection)
-    if topic not in node_config["list_of_subscribed_topics"]:
-        node_config["list_of_subscribed_topics"].append(topic)
-    # Save the callback details for when we receive a message on the topic
-    node_config["callbacks"][topic] = callback
+    with _subscriptions_lock:
+        if topic not in node_config["list_of_subscribed_topics"]:
+            node_config["list_of_subscribed_topics"].append(topic)
+        # Save the callback details for when we receive a message on the topic
+        node_config["callbacks"][topic] = callback
     return()
 
 #-----------------------------------------------------------------------------------------------
@@ -687,16 +692,17 @@ def unsubscribe_from_message_type(message_type:str):
     # Finally, remove all instances of the message type from the internal subscriptions list
     # Note we don't iterate through the list to remove items as it will change under us
     new_list_of_subscribed_topics = []
-    for subscribed_topic in node_config["list_of_subscribed_topics"]:
-        if subscribed_topic.startswith(message_type):
-            if node_config["enhanced_debugging"]:
-                logging.debug("MQTT-Client: Unsubscribing from topic '"+subscribed_topic+"'")
-            # Only unsubscribe if connected to the broker(if the client is disconnected
-            # from the broker then all subscriptions will already have been terminated)
-            if node_config["connected_to_broker"]: mqtt_client.unsubscribe(subscribed_topic)
-        else:
-            new_list_of_subscribed_topics.append(subscribed_topic)
-    node_config["list_of_subscribed_topics"] = new_list_of_subscribed_topics
+    with _subscriptions_lock:
+        for subscribed_topic in node_config["list_of_subscribed_topics"]:
+            if subscribed_topic.startswith(message_type):
+                if node_config["enhanced_debugging"]:
+                    logging.debug("MQTT-Client: Unsubscribing from topic '"+subscribed_topic+"'")
+                # Only unsubscribe if connected to the broker(if the client is disconnected
+                # from the broker then all subscriptions will already have been terminated)
+                if node_config["connected_to_broker"]: mqtt_client.unsubscribe(subscribed_topic)
+            else:
+                new_list_of_subscribed_topics.append(subscribed_topic)
+        node_config["list_of_subscribed_topics"] = new_list_of_subscribed_topics
     return()
 
 ##################################################################################################################
