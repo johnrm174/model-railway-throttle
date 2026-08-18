@@ -185,7 +185,8 @@ def mqtt_publish_thread():
             topic, payload, retain, qos = task
             # This is the signal to disconnect from the broker after all current messages have been published
             if topic == "DISCONNECT":
-                node_config["disconnection_in_progress"] = True
+                with node_config_thread_lock:
+                    node_config["disconnection_in_progress"] = True
                 common.execute_function_in_tkinter_thread(lambda:mqtt_disconnect_stage0())
             else:
                 success, retries = False, 0
@@ -193,7 +194,10 @@ def mqtt_publish_thread():
                 # between the time the message was put on the publish queue and the time we go to publish it.
                 # We attempt to publish 5 times before discarding the message
                 while not success and retries < 5:
-                    if node_config["connected_to_broker"] and not node_config["disconnection_in_progress"]:
+                    with node_config_thread_lock:
+                        connected = node_config["connected_to_broker"]
+                        disconnecting = node_config["disconnection_in_progress"]
+                    if connected and not disconnecting:
                         try:
                             info = mqtt_client.publish(topic, payload, retain=retain, qos=qos)
                             # Wait with a timeout 0f 5 seconds (prevents a permanent hang)
@@ -215,7 +219,9 @@ def mqtt_publish_thread():
                         time.sleep(1.0)
                         retries += 1
                 if not success:
-                    if node_config["connected_to_broker"]:
+                    with node_config_thread_lock:
+                        connected = node_config["connected_to_broker"]
+                    if connected:
                         logging.error(f"MQTT Interface: Permanently failed to publish to {topic} - Broker still connected")
                     else:
                         logging.error(f"MQTT Interface: Permanently failed to publish to {topic} - Broker is disconnected")
@@ -291,7 +297,8 @@ def on_disconnect(mqtt_client, userdata, rc):
     else:
         logging.warning("MQTT-Client: Unexpected disconnection from broker")
         node_config["unexpected_disconnection"] = True
-    node_config["connected_to_broker"] = False
+    with node_config_thread_lock:
+        node_config["connected_to_broker"] = False
     # Update the main application on the status of the connection
     if node_config["status_callback"] is not None:
         common.execute_function_in_tkinter_thread(lambda:node_config["status_callback"](False))
@@ -335,7 +342,8 @@ def on_connect(mqtt_client, userdata, flags, rc):
         if node_config["enhanced_debugging"]: logging.debug("MQTT-Client: Subscribing to: '"+shutdown_topic+"' from Broker")
         mqtt_client.subscribe(shutdown_topic)
         # Set the flag to report a successful connection
-        node_config["connected_to_broker"] = True
+        with node_config_thread_lock:
+            node_config["connected_to_broker"] = True
         # Start the heartbeat 'loop' (not really a thread - uses the root.after() method)
         # Note that we start this 'loop' in the main Tkinter Thread
         if not node_config["heartbeat_thread_started"]:
@@ -403,10 +411,15 @@ def process_message(topic, payload):
             # Make the callback (that was registered when the calling programme subscribed to the feed)
             # Note that we also need to test to see if the the topic is a partial match to cover the
             # case of subscribing to all subtopics for an specified item (with the '+' wildcard)
-            if topic in node_config["callbacks"]:
-                node_config["callbacks"][topic] (unpacked_json)
-            elif topic.rpartition('/')[0]+"/+" in node_config["callbacks"]:
-                node_config["callbacks"][topic.rpartition('/')[0]+"/+"] (unpacked_json)
+            callback = None
+            wildcard_topic = topic.rpartition('/')[0]+"/+"
+            with node_config_thread_lock:
+                if topic in node_config["callbacks"]:
+                    callback = node_config["callbacks"][topic]
+                elif wildcard_topic in node_config["callbacks"]:
+                    callback = node_config["callbacks"][wildcard_topic]
+            if callback is not None:
+                callback(unpacked_json)
             else:
                 logging.warning("MQTT-Client: unhandled message topic: "+str(topic))
     return()
@@ -557,13 +570,18 @@ def check_for_successful_connection():
 
 def mqtt_broker_disconnect():
     global mqtt_client
-    if node_config["connected_to_broker"] and not node_config["disconnection_in_progress"]:
+    with node_config_thread_lock:
+        connected = node_config["connected_to_broker"]
+        disconnecting = node_config["disconnection_in_progress"]
+    if connected and not disconnecting:
         logging.debug("MQTT-Client: Initiating broker disconnect")
         # Clean out the message queues on the broker by publishing null messages (empty strings)
         # to each of the topics that we have sent messages to during the lifetime of the session
-        if len(node_config["list_of_published_topics"])>0:
+        with node_config_thread_lock:
+            topics_to_purge = list(node_config["list_of_published_topics"])
+        if len(topics_to_purge)>0:
             logging.debug("MQTT-Client: Purging retained messages")
-        for topic in node_config["list_of_published_topics"]:
+        for topic in topics_to_purge:
             if node_config["enhanced_debugging"]: logging.debug("MQTT-Client: Publishing to Topic: "+str(topic)+", Message: NULL")
             mqtt_publish_queue.put((topic,None,True,1))
         # Signal the publish thread to disconnect from the broker when the publish queue is empty
@@ -571,16 +589,19 @@ def mqtt_broker_disconnect():
         # Wait for up to 10 seconds for the disconnect to begin
         timeout = time.time()+10
         while time.time() < timeout:
-            if node_config["disconnection_in_progress"]: break
+            with node_config_thread_lock:
+                disconnecting = node_config["disconnection_in_progress"]
+            if disconnecting: break
             time.sleep(0.01)
-        if not node_config["disconnection_in_progress"]:
+        if not disconnecting:
             logging.error("MQTT-Client: Timeout publishing shutdown messages to broker - initiating disconnect anyway")
             mqtt_disconnect_stage1()
     return()
 
 def mqtt_disconnect_stage0():
     logging.debug("MQTT-Client: Disconnecting from broker")
-    node_config["connected_to_broker"] = False
+    with node_config_thread_lock:
+        node_config["connected_to_broker"] = False
     common.root_window.after(100,lambda:mqtt_disconnect_stage1())
     # Cancel the connection_timeout_check (scheduled from the connect function)
     connection_timeout_check_scheduled = node_config["connection_check_event"]
@@ -601,7 +622,8 @@ def mqtt_disconnect_stage2():
 def mqtt_disconnect_stage3():
     global mqtt_client
     mqtt_client= None
-    node_config["disconnection_in_progress"] = False
+    with node_config_thread_lock:
+        node_config["disconnection_in_progress"] = False
 
 #-----------------------------------------------------------------------------------------------
 # Externally called function to publish a 'shutdown' message to other network nodes.
@@ -646,10 +668,11 @@ def subscribe_to_mqtt_messages (message_type:str,item_node:str,item_id:int,callb
     elif node_config["enhanced_debugging"]: logging.debug("MQTT-Client: Adding subscription topic '"+topic+"'")
     # Add to the list of subscribed topics (so we can re-subscribe on reconnection)
     with node_config_thread_lock:
-        if topic not in node_config["list_of_subscribed_topics"]:
-            node_config["list_of_subscribed_topics"].append(topic)
-    # Save the callback details for when we receive a message on the topic
-    node_config["callbacks"][topic] = callback
+        subscribed_topics = node_config["list_of_subscribed_topics"]
+        if topic not in subscribed_topics:
+            subscribed_topics.append(topic)
+        callbacks = node_config["callbacks"]
+        callbacks[topic] = callback
     return()
 
 #-----------------------------------------------------------------------------------------------
@@ -677,8 +700,9 @@ def send_mqtt_message (message_type:str,item_id:int,data:dict,log_message:str=No
         mqtt_publish_queue.put((topic,payload,retain,1))
         # Add to the list of published topics so we can 'Clean up'
         # the MQTT broker by publishing empty messages on shutdown
-        if topic not in node_config["list_of_published_topics"]:
-            node_config["list_of_published_topics"].append(topic)
+        with node_config_thread_lock:
+            if topic not in node_config["list_of_published_topics"]:
+                node_config["list_of_published_topics"].append(topic)
     elif node_config["enhanced_debugging"]:
         logging.debug("MQTT-Client: Broker Disconnected - Discarding message: "+str(payload))
     return()
@@ -696,17 +720,26 @@ def unsubscribe_from_message_type(message_type:str):
     # Topic format: "<Message-Type>/<Network-ID>/<Item_Identifier>/<optional-subtopic>"
     # Finally, remove all instances of the message type from the internal subscriptions list
     # Note we don't iterate through the list to remove items as it will change under us
-    new_list_of_subscribed_topics = []
-    for subscribed_topic in node_config["list_of_subscribed_topics"]:
-        if subscribed_topic.startswith(message_type):
-            if node_config["enhanced_debugging"]:
-                logging.debug("MQTT-Client: Unsubscribing from topic '"+subscribed_topic+"'")
-            # Only unsubscribe if connected to the broker(if the client is disconnected
-            # from the broker then all subscriptions will already have been terminated)
-            if node_config["connected_to_broker"]: mqtt_client.unsubscribe(subscribed_topic)
-        else:
-            new_list_of_subscribed_topics.append(subscribed_topic)
-    node_config["list_of_subscribed_topics"] = new_list_of_subscribed_topics
+    topics_to_unsubscribe = []
+    with node_config_thread_lock:
+        new_list_of_subscribed_topics = []
+        for subscribed_topic in node_config["list_of_subscribed_topics"]:
+            if subscribed_topic.startswith(message_type):
+                topics_to_unsubscribe.append(subscribed_topic)
+                node_config["callbacks"].pop(subscribed_topic, None)
+            else:
+                new_list_of_subscribed_topics.append(subscribed_topic)
+        node_config["list_of_subscribed_topics"] = new_list_of_subscribed_topics
+    for subscribed_topic in topics_to_unsubscribe:
+        with node_config_thread_lock:
+            enhanced_debugging = node_config["enhanced_debugging"]
+            connected_to_broker = node_config["connected_to_broker"]
+        if enhanced_debugging:
+            logging.debug("MQTT-Client: Unsubscribing from topic '"+subscribed_topic+"'")
+        # Only unsubscribe if connected to the broker(if the client is disconnected
+        # from the broker then all subscriptions will already have been terminated)
+        if connected_to_broker:
+            mqtt_client.unsubscribe(subscribed_topic)
     return()
 
 ##################################################################################################################
