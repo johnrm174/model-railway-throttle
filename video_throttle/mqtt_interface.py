@@ -702,7 +702,11 @@ def unsubscribe_from_message_type(message_type:str):
     # Finally, remove all instances of the message type from the internal subscriptions list
     # Note we don't iterate through the list to remove items as it will change under us
     topics_to_unsubscribe = []
+    enhanced_debugging = False
+    connected_to_broker = False
     with node_config_thread_lock:
+        enhanced_debugging = node_config["enhanced_debugging"]
+        connected_to_broker = node_config["connected_to_broker"]
         new_list_of_subscribed_topics = []
         for subscribed_topic in node_config["list_of_subscribed_topics"]:
             if subscribed_topic.startswith(message_type):
@@ -712,11 +716,11 @@ def unsubscribe_from_message_type(message_type:str):
                 new_list_of_subscribed_topics.append(subscribed_topic)
         node_config["list_of_subscribed_topics"] = new_list_of_subscribed_topics
     for subscribed_topic in topics_to_unsubscribe:
-        if node_config["enhanced_debugging"]:
+        if enhanced_debugging:
             logging.debug("MQTT-Client: Unsubscribing from topic '"+subscribed_topic+"'")
         # Only unsubscribe if connected to the broker(if the client is disconnected
         # from the broker then all subscriptions will already have been terminated)
-        if node_config["connected_to_broker"]:
+        if connected_to_broker:
             mqtt_client.unsubscribe(subscribed_topic)
     return()
 
