@@ -35,20 +35,19 @@ class ThrottleApplication(Tk.Tk):
         file_menu.add_command(label="Save", command=self.save_throttle_file)
         file_menu.add_command(label="Save As...", command=self.save_throttle_file_as)
         file_menu.add_separator()
-        file_menu.add_command(label="Configure...", command=self.open_loco_config)
-        file_menu.add_separator()
         file_menu.add_command(label="Examples...", command=self.load_example_file)
         file_menu.add_separator()
         file_menu.add_command(label="Quit", command=self.on_exit)
-        menubar.add_cascade(label="Locomotive", menu=file_menu)
+        menubar.add_cascade(label="File", menu=file_menu)
         # Settings Menu
         settings_menu = Tk.Menu(menubar, tearoff=0)
         settings_menu.add_command(label="MQTT...", command=self.open_mqtt_settings)
         settings_menu.add_command(label="General...", command=self.open_general_settings)
+        settings_menu.add_command(label="Loco...", command=self.open_loco_config)
         menubar.add_cascade(label="Settings", menu=settings_menu)
         # Tools Menu
         tools_menu = Tk.Menu(menubar, tearoff=0)
-        tools_menu.add_command(label="Camera...", command=self.open_camera_tool)
+        tools_menu.add_command(label="Camera programming...", command=self.open_camera_tool)
         menubar.add_cascade(label="Tools", menu=tools_menu)
         # Help Menu
         help_menu = Tk.Menu(menubar, tearoff=0)
@@ -116,8 +115,8 @@ class ThrottleApplication(Tk.Tk):
         req_height = self.workspace.winfo_reqheight()
         # Get user's screen boundaries
         screen_height = self.winfo_screenheight()
-        # Restrict window height to 85% of screen height to clear OS panels safely
-        max_allowed_height = int(screen_height * 0.85)
+        # Restrict window height to 90% of screen height to clear OS panels safely
+        max_allowed_height = int(screen_height * 0.9)
         if req_height > max_allowed_height:
             final_height = max_allowed_height
         else:

@@ -4,6 +4,9 @@ import logging
 import time
 import socket
 import cv2
+import queue
+import io
+import multiprocessing as mp
 from PIL import Image, ImageTk
 from zeroconf import Zeroconf, ServiceBrowser
 from tkinter import ttk
@@ -169,6 +172,7 @@ class LocoConfigWindow(Tk.Toplevel):
 
     def close_window(self):
         self.window_closing = True
+        self.close_discovery_engine()
         self.stop_preview_stream()
         self.current_preview_url = ""
         # Stop the periodic network scan
@@ -201,7 +205,7 @@ class LocoConfigWindow(Tk.Toplevel):
             return
         self.run_discovery_if_idle()
         self.after(self.scan_interval_ms, self.schedule_discovery_tick)
-        
+
     def run_discovery_if_idle(self):
         # Don't start another scan if previous scan thread still running
         if self.scan_in_progress:
@@ -209,67 +213,106 @@ class LocoConfigWindow(Tk.Toplevel):
         self.scan_in_progress = True
         self.scan_thread = threading.Thread(target=self.scan_network, daemon=True)
         self.scan_thread.start()
-        
-    def scan_network(self):
+
+    def _ensure_discovery_engine(self):
+        """
+        Create and retain a long-lived Zeroconf + ServiceBrowser pair.
+        This avoids repeatedly creating background threads and sockets every scan tick.
+        """
+        if getattr(self, "_discovery_zeroconf", None) is not None:
+            return
+
         class ESPHomeDiscovery:
-            def __init__(self, callback):
-                self.callback = callback
-                self.found_count = 0
-                    
+            def __init__(self, outer):
+                self.outer = outer
+
             def add_service(self, zc, type_, name):
                 info = zc.get_service_info(type_, name)
-                if info:
-                    for address in info.addresses:
-                        try:
-                            ip = socket.inet_ntoa(address)
-                        except Exception:
-                            continue
-                        clean_name = name.split('.')[0]
-                        # FIXED: Use hardcoded 8080 (the actual web server port)
-                        # mDNS port 80 is just the service port, not the web server port
-                        url = f"http://{ip}:8080"
-                        self.callback(clean_name, url)
-                        self.found_count += 1
+                if not info:
+                    return
+
+                for address in info.addresses:
+                    try:
+                        ip = socket.inet_ntoa(address)
+                    except Exception:
+                        continue
+
+                    clean_name = name.split('.')[0]
+                    url = f"http://{ip}:8080"
+
+                    # Cache discovery results in a persistent store
+                    self.outer._discovered_camera_cache[clean_name] = url
+
+                    # Update UI-facing list on the Tk thread
+                    self.outer.after(
+                        0,
+                        lambda n=clean_name, u=url: self.outer.register_discovered_camera(n, u)
+                    )
 
             def update_service(self, zc, type_, name):
                 pass
 
             def remove_service(self, zc, type_, name):
                 pass
-    
-        zeroconf = None
+
+        if not hasattr(self, "_discovered_camera_cache"):
+            self._discovered_camera_cache = {}
+
+        self._discovery_zeroconf = Zeroconf()
+        self._discovery_listener = ESPHomeDiscovery(self)
+        self._discovery_browser = ServiceBrowser(
+            self._discovery_zeroconf,
+            ["_esphomelib._tcp.local.", "_http._tcp.local."],
+            self._discovery_listener)
+
+    def scan_network(self):
         try:
             # Preserve baseline options AND saved URLs
             baseline = {"None": "", "Manual URL Entry": ""}
             saved_urls = {k: v for k, v in self.discovered_cameras.items() if k.startswith("[Saved]")}
             self.discovered_cameras = baseline.copy()
             self.discovered_cameras.update(saved_urls)
-            zeroconf = Zeroconf()
-            listener = ESPHomeDiscovery(self.register_discovered_camera)
-            service_browser = ServiceBrowser(zeroconf, ["_esphomelib._tcp.local.", "_http._tcp.local."], listener)
-            #  Wait longer for async callbacks to fire (3 seconds)
+
+            for name, url in getattr(self, "_discovered_camera_cache", {}).items():
+                display_label = f"DISCOVERED: {name} ({url})"
+                self.discovered_cameras[display_label] = url
+
+            self._ensure_discovery_engine()
+            # Allow async callbacks to fire while keeping the discovery engine alive
             time.sleep(3.0)
         except Exception as e:
             logging.error(f"[Discovery] Error during scan: {e}")
         finally:
-            try:
-                if zeroconf is not None:
-                    zeroconf.close()
-            except Exception as e:
-                logging.error(f"[Discovery] Error closing Zeroconf: {e}")
             self.scan_in_progress = False
-    
+
     def register_discovered_camera(self, name, url):
         url = url.rstrip('/')
         display_label = f"DISCOVERED: {name} ({url})"
         self.discovered_cameras[display_label] = url
         # Only debounce if user just selected something
         if not self.user_just_selected:
-            self.after(0, self.update_camera_dropdown_values)            
+            self.after(0, self.update_camera_dropdown_values)
             
+    def close_discovery_engine(self):
+        try:
+            browser = getattr(self, "_discovery_browser", None)
+            if browser is not None:
+                try:
+                    browser.cancel()
+                except Exception:
+                    pass
+            zeroconf = getattr(self, "_discovery_zeroconf", None)
+            if zeroconf is not None:
+                try:
+                    zeroconf.close()
+                except Exception as e:
+                    logging.error(f"[Discovery] Error closing Zeroconf: {e}")
+        finally:
+            self._discovery_browser = None
+            self._discovery_listener = None
+            self._discovery_zeroconf = None
+
     def update_camera_dropdown_values(self):
-        ##############################################################NEED MORE PROTECTION HERE ########################################
-        # FIXED: Check if widgets still exist
         if not hasattr(self, 'entries'):
             return
         options = list(self.discovered_cameras.keys())
@@ -297,6 +340,56 @@ class LocoConfigWindow(Tk.Toplevel):
     # Preview Handler
     # -------------------------------------------------------------------------
 
+    def _preview_worker_process(self, url, frame_queue, control_queue):
+        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+        try:
+            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 1200)
+        except Exception:
+            pass
+        try:
+            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 400)
+        except Exception:
+            pass
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
+        if cap is None or not cap.isOpened():
+            frame_queue.put(("status", "Unable to open stream", "red"))
+            try:
+                cap.release()
+            except Exception:
+                pass
+            return
+        frame_queue.put(("status", "Streaming Active", "green"))
+        while True:
+            try:
+                cmd = control_queue.get_nowait()
+                if cmd == "stop":
+                    break
+            except queue.Empty:
+                pass
+            except Exception:
+                break
+            ret, frame = cap.read()
+            if not ret:
+                frame_queue.put(("status", "Stream disconnected or unavailable", "red"))
+                break
+            frame = cv2.convertScaleAbs(frame, alpha=self.contrast, beta=self.brightness)
+            frame = cv2.resize(frame, (320, 240))
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            ok, encoded = cv2.imencode(".png", frame)
+            if not ok:
+                continue
+            try:
+                frame_queue.put(("frame", encoded.tobytes()), timeout=0.2)
+            except Exception:
+                break
+        try:
+            cap.release()
+        except Exception:
+            pass
+        
     def set_last_preview_selection(self, label, url):
         self.last_preview_selection_label = label if label else "None"
         self.last_preview_selection_url = url.strip() if isinstance(url, str) else ""
@@ -314,18 +407,7 @@ class LocoConfigWindow(Tk.Toplevel):
             pass
         if hasattr(self, "status_label") and self.status_label.winfo_exists():
             self.status_label.config(text=message, fg="gray")
-            
-    def stop_preview_stream(self, wait=False, timeout=1.5):
-        self.preview_thread_running = False
-        self.preview_generation += 1
-        self.preview_token += 1   # invalidate all queued UI callbacks from old stream
-        if wait and self.preview_thread is not None and self.preview_thread.is_alive():
-            try:
-                self.preview_thread.join(timeout=timeout)
-            except Exception:
-                pass
-        self.preview_thread = None
-        
+
     def on_camera_selected(self, key):
         selected_label = self.entries[key].get().strip()
         # The label stays in the combobox display - but we extract the URL for preview
@@ -373,43 +455,94 @@ class LocoConfigWindow(Tk.Toplevel):
         self.stop_preview_stream(wait=True)
         self.status_label.config(text="Connecting to stream...", fg="orange")
         self.current_preview_url = url
-        self.preview_thread_running = True
         self.preview_generation += 1
-        this_generation = self.preview_generation
-        this_token = self.preview_token
-        self.preview_thread = threading.Thread(target=self.stream_worker, args=(url, this_generation, this_token), daemon=True)
-        self.preview_thread.start()
+        self.preview_token += 1
+        self.preview_frame_queue = mp.Queue(maxsize=2)
+        self.preview_control_queue = mp.Queue(maxsize=2)
+        self.preview_worker_alive = True
+        self.preview_last_frame_at = time.monotonic()
+        self.preview_watchdog_ms = 5000
+        self.preview_process = mp.Process(
+            target=self._preview_worker_process,
+            args=(url, self.preview_frame_queue, self.preview_control_queue),
+            daemon=True)
+        self.preview_process.start()
+        self.after(50, self.poll_preview_queue)
+        self.after(250, self.preview_watchdog)
 
-    def stream_worker(self, url, generation, token):
-        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-        try: cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 1200)
-        except Exception: pass
-        try: cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 400)
-        except Exception: pass
-        try: cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        except Exception: pass
-        if cap is None or not cap.isOpened():
-            self.after(0, lambda g=generation, t=token:
-                self.safe_preview_status("Unable to open stream", "red", g, t))
-            try: cap.release()
-            except Exception: pass
+    def poll_preview_queue(self):
+        if not getattr(self, "preview_worker_alive", False):
             return
-        while self.preview_thread_running and generation == self.preview_generation and url == self.current_preview_url:
-            ret, frame = cap.read()
-            if not ret:
-                self.after(0, lambda g=generation, t=token:
-                    self.safe_preview_status("Stream disconnected or unavailable", "red", g, t))
-                break
-            self.after(0, lambda g=generation, t=token:
-                self.safe_preview_status("Streaming Active", "green", g, t))
-            frame = cv2.convertScaleAbs(frame, alpha=self.contrast, beta=self.brightness)
-            frame = cv2.resize(frame, (320, 240))
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img_tk = ImageTk.PhotoImage(image=Image.fromarray(frame))
-            self.after(0, lambda image=img_tk, g=generation, t=token:
-                self.draw_frame(image, g, t))
-            time.sleep(0.05)
-        cap.release()
+        try:
+            while True:
+                kind, *payload = self.preview_frame_queue.get_nowait()
+
+                if kind == "status":
+                    text, color = payload
+                    self.safe_preview_status(text, color, self.preview_generation, self.preview_token)
+                    if text in ("Unable to open stream", "Stream disconnected or unavailable"):
+                        self.stop_preview_stream(wait=False)
+                        return
+                elif kind == "frame":
+                    data = payload[0]
+                    self.preview_last_frame_at = time.monotonic()
+                    img = Image.open(io.BytesIO(data))
+                    img_tk = ImageTk.PhotoImage(img)
+                    self.draw_frame(img_tk, self.preview_generation, self.preview_token)
+        except queue.Empty:
+            pass
+        except Exception:
+            pass
+        if self.preview_worker_alive:
+            self.after(50, self.poll_preview_queue)
+
+    def preview_watchdog(self):
+        if not getattr(self, "preview_worker_alive", False):
+            return
+        if time.monotonic() - getattr(self, "preview_last_frame_at", 0) > 5.0:
+            self.safe_preview_status("Stream stalled", "red", self.preview_generation, self.preview_token)
+            self.stop_preview_stream(wait=False)
+            return
+        self.after(250, self.preview_watchdog)
+
+    def stop_preview_stream(self, wait=False, timeout=1.5):
+        self.preview_generation += 1
+        self.preview_token += 1
+        self.preview_worker_alive = False
+        exited_cleanly = True
+        proc = getattr(self, "preview_process", None)
+        if proc is not None:
+            try:
+                if getattr(self, "preview_control_queue", None) is not None:
+                    try:
+                        self.preview_control_queue.put_nowait("stop")
+                    except Exception:
+                        pass
+                if wait:
+                    proc.join(timeout=timeout)
+                if proc.is_alive():
+                    exited_cleanly = False
+                    proc.terminate()
+                    proc.join(timeout=timeout)
+                    if proc.is_alive():
+                        exited_cleanly = False
+                    else:
+                        exited_cleanly = False
+            except Exception:
+                exited_cleanly = False
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            finally:
+                self.preview_process = None
+        self.preview_control_queue = None
+        self.preview_frame_queue = None
+        self.preview_thread_running = False
+        return exited_cleanly
+
+    def validate_preview_ready(self, timeout=1.5):
+        return self.stop_preview_stream(wait=True, timeout=timeout)
 
     def safe_preview_status(self, text, color, generation, token):
         if token != self.preview_token: return
@@ -422,7 +555,7 @@ class LocoConfigWindow(Tk.Toplevel):
             return
         if generation != self.preview_generation:
             return
-        if self.preview_thread_running:
+        if self.preview_worker_alive:
             self.preview_canvas.delete("preview_text")
             self.preview_canvas.itemconfig(self.preview_image_id, image=img_tk)
             self.preview_canvas.image = img_tk
@@ -479,7 +612,8 @@ class LocoConfigWindow(Tk.Toplevel):
             "fwd_stream_url": fwd_url,
             "rev_stream_url": rev_url}
         # Disconnect preview stream before saving, so main app can take the feed immediately.
-        self.stop_preview_stream(wait=True)
+        if not self.validate_preview_ready(timeout=1.5):
+            logging.warning("[Preview] Previous preview worker did not stop cleanly; continuing save anyway.")
         self.current_preview_url = ""
         self.status_label.config(text="Stream Released", fg="gray")
         self.preview_canvas.itemconfig(self.preview_image_id, image="")

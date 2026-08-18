@@ -92,9 +92,44 @@ class dial(Tk.Canvas):
         self.coords(self.needle, self.center, self.center, x, y)
         
 #--------------------------------------------------------------------------------------------------------
+# Video stream tuning constants
+#--------------------------------------------------------------------------------------------------------
+
+VIDEO_FRAME_QUEUE_SIZE = 2
+VIDEO_STATUS_QUEUE_SIZE = 8
+VIDEO_WIDTH = 480
+VIDEO_HEIGHT = 360
+VIDEO_SWITCH_DEBOUNCE_S = 0.25
+# Reader-side detection
+VIDEO_OPEN_TIMEOUT_MSEC = 2000
+VIDEO_READ_TIMEOUT_MSEC = 1000
+VIDEO_BUFFERSIZE = 1
+VIDEO_READ_RETRY_SLEEP_S = 0.02
+VIDEO_READ_FAILS_BEFORE_INTERRUPT = 2
+# Manager-side detection
+VIDEO_DROP_DETECT_S = 0.5
+VIDEO_UI_POLL_MS = 30
+# Reconnect policy
+VIDEO_INITIAL_CONNECT_WINDOW_S = 5.0
+VIDEO_RECONNECT_ATTEMPT_INTERVAL_S = 0.25
+VIDEO_RECONNECT_WINDOW_S = 5.0
+# Process shutdown
+VIDEO_PROCESS_JOIN_TIMEOUT_S = 0.2
+VIDEO_PROCESS_TERMINATE_JOIN_TIMEOUT_S = 0.3
+# User-facing messages
+VIDEO_MSG_SELECT_DIRECTION = "Select cab direction (FWD/REV) to start video"
+VIDEO_MSG_NO_URL_TEMPLATE = "No {direction} video stream URL configured"
+VIDEO_MSG_CONNECTING = "Connecting to cab view..."
+VIDEO_MSG_RECONNECTING = "Attempting video reconnect..."
+VIDEO_MSG_LOST = "Video feed lost"
+VIDEO_MSG_OPEN_FAILED = "Unable to open video stream"
+VIDEO_MSG_RENDER_ERROR = "Video render error"
+VIDEO_MSG_CONNECT_FAILED = "Failed to connect to video feed"
+
+#--------------------------------------------------------------------------------------------------------
 #    Isolated subprocess that handles blocking video I/O. Communicates only via queues.
 #    Invariant: Frame queue has maxsize=2 (always discard oldest when full).
-#    Invariant: Status messages are sent only on state changes (connected, lost, error).
+#    Invariant: Status messages are sent only on state changes / terminal reader events.
 #--------------------------------------------------------------------------------------------------------
    
 class VideoReaderProcess(multiprocessing.Process):
@@ -110,12 +145,12 @@ class VideoReaderProcess(multiprocessing.Process):
         self.brightness = brightness
         self.contrast = contrast
 
-    def push_status(self, message):
+    def push_status(self, kind, message):
         # Send a status update to the UI (non-blocking).
         try:
-            self.status_queue.put_nowait(("status", self.generation, message))
+            self.status_queue.put_nowait((kind, self.generation, message))
         except queue.Full:
-            pass  # Status queue full; skip—UI will see next status on recovery
+            pass
 
     def push_frame(self, frame_rgb):
         # Push frame, silently dropping oldest if queue is full (FIFO freshness)
@@ -123,26 +158,27 @@ class VideoReaderProcess(multiprocessing.Process):
             self.frame_queue.put_nowait(("frame", self.generation, frame_rgb))
         except queue.Full:
             try:
-                self.frame_queue.get_nowait()  # Remove oldest
-                self.frame_queue.put_nowait(("frame", self.generation, frame_rgb))  # Add newest
+                self.frame_queue.get_nowait()
+                self.frame_queue.put_nowait(("frame", self.generation, frame_rgb))
             except Exception:
-                pass  # If this fails, skip this frame and move on
+                pass
 
     def run(self):
         cap = None
         fail_count = 0
+        sent_connected = False
         try:
             logging.debug(f"VideoReaderProcess - gen={self.generation} - Initialising")
             cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
-            try: cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 2000)
+            try: cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, VIDEO_OPEN_TIMEOUT_MSEC)
             except Exception: pass
-            try: cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 1000)
+            try: cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, VIDEO_READ_TIMEOUT_MSEC)
             except Exception: pass
-            try: cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            try: cap.set(cv2.CAP_PROP_BUFFERSIZE, VIDEO_BUFFERSIZE)
             except Exception: pass
             if cap is None or not cap.isOpened():
                 logging.warning(f"VideoReaderProcess - gen={self.generation} - FAILED to open {self.url}")
-                self.push_status("Unable to open video stream")
+                self.push_status("open_failed", VIDEO_MSG_OPEN_FAILED)
                 return
             logging.debug(f"VideoReaderProcess - gen={self.generation} - Opened {self.url}, starting video stream")  
             while not self.stop_event.is_set():
@@ -152,43 +188,51 @@ class VideoReaderProcess(multiprocessing.Process):
                         break
                     if not ret or frame is None:
                         fail_count += 1
-                        if fail_count >= 3:
-                            logging.warning(f"[VIDEO] Reader gen={self.generation} - Lost video stream")
-                            self.push_status("Video stream lost")
+                        if fail_count >= VIDEO_READ_FAILS_BEFORE_INTERRUPT:
+                            logging.warning(f"VideoReaderProcess - gen={self.generation} - Stream interrupted")
+                            self.push_status("interrupted", "Video stream interrupted")
                             break
-                        time.sleep(0.05)
-                        continue 
+                        time.sleep(VIDEO_READ_RETRY_SLEEP_S)
+                        continue
+                    if not sent_connected:
+                        self.push_status("connected", "connected")
+                        sent_connected = True
                     fail_count = 0
+                    
                     frame = cv2.resize(frame, (self.width, self.height))
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    frame_float = frame.astype(numpy.float32) / 255.0
-                    frame_float = self.contrast * (frame_float - 0.5) + 0.5
-                    brightness_factor = self.brightness / 100.0
-                    frame_float = frame_float + brightness_factor
-                    frame_float = numpy.clip(frame_float, 0.0, 1.0)
-                    frame = (frame_float * 255).astype(numpy.uint8)
+                    frame_float = frame.astype(numpy.float32)
+                    numpy.multiply(frame_float, 1.0 / 255.0, out=frame_float)
+                    numpy.subtract(frame_float, 0.5, out=frame_float)
+                    numpy.multiply(frame_float, self.contrast, out=frame_float)
+                    numpy.add(frame_float, 0.5, out=frame_float)
+                    numpy.add(frame_float, self.brightness / 100.0, out=frame_float)
+                    numpy.clip(frame_float, 0.0, 1.0, out=frame_float)
+                    frame = (frame_float * 255.0).astype(numpy.uint8)
                     self.push_frame(frame)
                 except Exception as e:
+                    if self.stop_event.is_set():
+                        break
                     logging.warning(f"VideoReaderProcess - gen={self.generation} - Exception: {e}")
-                    self.push_status(f"Video stream error: {e}")
+                    self.push_status("error", f"Video stream error: {e}")
                     break
         finally:
             if cap is not None:
                 try: cap.release()
                 except Exception: pass
-                logging.debug(f"VideoReaderProcess - gen={self.generation} - Exiting")
+            logging.debug(f"VideoReaderProcess - gen={self.generation} - Exiting")
 
 #--------------------------------------------------------------------------------------------------------
 # Simplified Video Management: Single Source of Truth
 #    Encapsulates all video lifecycle logic. Separates concerns:
 #    - State tracking (running, generation, direction, URLs)
-#    - Process lifecycle (start, stop, monitoring)
+#    - Process lifecycle (start, stop, monitoring, reconnect)
 #    - UI updates (queues, painting, messages)
 #    Invariants:
 #    - Only one generation's reader process exists at a time
-#    - process is None ⟺ not running
-#    - Reader process is fully stopped before incrementing generation
-#    - Status messages are queued exactly once per lifecycle event
+#    - process is None ⟺ no reader currently active
+#    - Reconnect attempts continue only within VIDEO_RECONNECT_WINDOW_S
+#    - After reconnect window expires, stream enters sticky lost state until user toggles feed
 #--------------------------------------------------------------------------------------------------------
 
 class VideoStreamManager:
@@ -210,14 +254,17 @@ class VideoStreamManager:
         self.video_status_queue = None
         # Timing (protected by state_lock)
         self.video_last_frame_ts = 0.0
-        self.video_last_reconnect_ts = 0.0
-        self.video_stall_timeout_s = 3.0
-        self.video_reconnect_cooldown_s = 1.0
+        self.video_reconnect_start_ts = 0.0
+        self.video_last_reconnect_attempt_ts = 0.0
         # Switch debouncing (separate lock to avoid contention)
         self.switch_lock = threading.Lock()
         self.last_video_switch_ts = 0.0
-        # Current status/error (protected by state_lock)
+        # Current state / status (protected by state_lock)
+        self.video_has_ever_connected = False
         self.video_status = None
+        self.video_reconnecting = False
+        self.video_terminal_failure = False
+        self.video_target_url = None
         # Stream adjustments
         self.stream_brightness = 0
         self.stream_contrast = 1.0
@@ -248,8 +295,8 @@ class VideoStreamManager:
         # Orchestrates: cleanup old reader → check direction/URLs → start new reader.
         with self.switch_lock:
             now = time.monotonic()
-            if now - self.last_video_switch_ts < 0.25:
-                return  # Debounced; ignore rapid calls
+            if now - self.last_video_switch_ts < VIDEO_SWITCH_DEBOUNCE_S:
+                return
             self.last_video_switch_ts = now
         # Snapshot intent (direction + URL) under lock
         with self.state_lock:
@@ -260,29 +307,32 @@ class VideoStreamManager:
             elif direction is False:
                 target_url = self.rev_stream_url
             direction_name = "Forward" if direction is True else "Reverse" if direction is False else None
-        # Stop any existing reader synchronously (no UI thread blocking)
+        # Stop any existing reader synchronously
         self._stop_reader_sync()
-        # Clear any stale error status when switching direction
+        # Clear transient state when switching source
         with self.state_lock:
             self.video_status = None
+            self.video_reconnecting = False
+            self.video_terminal_failure = False
+            self.video_reconnect_start_ts = 0.0
+            self.video_last_reconnect_attempt_ts = 0.0
+            self.video_target_url = target_url
+            self.video_has_ever_connected = False
         # Handle each case
         if direction is None:
-            # No direction selected; show idle message (on Tk thread)
             self.root_window.after(0, lambda: self.show_message_callback(
-                "Select cab direction (FWD/REV) to start video"))
+                VIDEO_MSG_SELECT_DIRECTION))
             return
         if not target_url:
-            # Direction selected but no URL (on Tk thread)
             self.root_window.after(0, lambda dn=direction_name: self.show_message_callback(
-                f"No {dn.lower()} video stream URL configured", color="orange"))
+                VIDEO_MSG_NO_URL_TEMPLATE.format(direction=dn.lower()), color="orange"))
             return
-        # Valid direction + URL; start new reader (on Tk thread for message, then off-Tk for reader)
-        self.root_window.after(0, lambda: self.show_message_callback("Connecting to cab view...", color="orange"))
+        # Valid direction + URL; start new reader
+        self.root_window.after(0, lambda: self.show_message_callback(VIDEO_MSG_CONNECTING, color="orange"))
         self._start_reader(target_url)
 
     def _stop_reader_sync(self):
         # Synchronously stop the current reader process and drain queues.
-        # Does NOT invalidate generation (allow immediate re-use if caller wishes).
         p = None
         ev = None
         with self.state_lock:
@@ -290,8 +340,6 @@ class VideoStreamManager:
             ev = self.video_reader_stop_event
             self.video_reader_process = None
             self.video_reader_stop_event = None
-            self.video_running = False
-            # Note: do NOT increment generation here; let caller decide
         if p is None:
             return
         # Signal stop
@@ -302,7 +350,7 @@ class VideoStreamManager:
             pass
         # Join with timeout
         try:
-            p.join(timeout=0.2)
+            p.join(timeout=VIDEO_PROCESS_JOIN_TIMEOUT_S)
         except Exception:
             pass
         # Force-terminate if still alive
@@ -312,7 +360,7 @@ class VideoStreamManager:
             except Exception:
                 pass
             try:
-                p.join(timeout=0.3)
+                p.join(timeout=VIDEO_PROCESS_TERMINATE_JOIN_TIMEOUT_S)
             except Exception:
                 pass
         # Drain queues off Tk thread to avoid blocking
@@ -336,7 +384,7 @@ class VideoStreamManager:
         except (queue.Empty, Exception):
             pass
 
-    def _start_reader(self, url: str):
+    def _start_reader(self, url: str, reset_connection_history=True):
         # Create and start a new reader process.
         # Increments generation and sets running=True before returning.
         with self.state_lock:
@@ -344,34 +392,94 @@ class VideoStreamManager:
             gen = self.video_connect_generation
             self.video_running = True
             self.video_status = None
+            self.video_target_url = url
             self.video_last_frame_ts = time.monotonic()
-            self.video_frame_queue = multiprocessing.Queue(maxsize=2)
-            self.video_status_queue = multiprocessing.Queue(maxsize=8)
+            self.video_frame_queue = multiprocessing.Queue(maxsize=VIDEO_FRAME_QUEUE_SIZE)
+            self.video_status_queue = multiprocessing.Queue(maxsize=VIDEO_STATUS_QUEUE_SIZE)
             self.video_reader_stop_event = multiprocessing.Event()
+            if reset_connection_history: self.video_has_ever_connected = False
+            brightness = self.stream_brightness
+            contrast = self.stream_contrast
         reader = VideoReaderProcess(
             url=url,
             generation=gen,
             frame_queue=self.video_frame_queue,
             status_queue=self.video_status_queue,
             stop_event=self.video_reader_stop_event,
-            width=480,
-            height=270,
-            brightness=self.stream_brightness,
-            contrast=self.stream_contrast)
+            width=VIDEO_WIDTH,
+            height=VIDEO_HEIGHT,
+            brightness=brightness,
+            contrast=contrast)
         reader.start()
         with self.state_lock:
             self.video_reader_process = reader
-        self.root_window.after(0, lambda: self.show_message_callback("Connecting to cab view...", color="orange"))
+
+    def _begin_reconnect_locked(self, now, reason=None):
+        # Caller must hold state_lock.
+        if self.video_terminal_failure:
+            return
+        if not self.video_reconnecting:
+            self.video_reconnect_start_ts = now
+        self.video_reconnecting = True
+        self.video_last_reconnect_attempt_ts = 0.0
+        self.video_status = reason or VIDEO_MSG_RECONNECTING
+
+    def _begin_reconnect(self, reason=None):
+        now = time.monotonic()
+        self._stop_reader_sync()
+        with self.state_lock:
+            if not self.video_running:
+                return
+            self._begin_reconnect_locked(now, reason=reason)
+        self.root_window.after(0, lambda: self.show_message_callback(VIDEO_MSG_RECONNECTING, color="orange"))
+
+    def _enter_terminal_lost_state(self, message=None):
+        self._stop_reader_sync()
+        with self.state_lock:
+            self.video_running = False
+            self.video_reconnecting = False
+            self.video_terminal_failure = True
+            self.video_status = message or VIDEO_MSG_LOST
+        self.root_window.after(0, lambda msg=self.video_status: self.show_message_callback(msg, color="red"))
+
+    def _maybe_attempt_reconnect(self, now):
+        with self.state_lock:
+            if not self.video_running or not self.video_reconnecting or self.video_terminal_failure:
+                return False
+            target_url = self.video_target_url
+            reconnect_started = self.video_reconnect_start_ts
+            last_attempt = self.video_last_reconnect_attempt_ts
+            if not target_url:
+                self.video_running = False
+                self.video_reconnecting = False
+                self.video_terminal_failure = True
+                self.video_status = VIDEO_MSG_LOST
+                self.root_window.after(0, lambda: self.show_message_callback(VIDEO_MSG_LOST, color="red"))
+                return True
+            reconnect_expired = (now - reconnect_started) >= VIDEO_RECONNECT_WINDOW_S
+            should_start = (last_attempt == 0.0 or
+                            (now - last_attempt) >= VIDEO_RECONNECT_ATTEMPT_INTERVAL_S)
+            if not reconnect_expired and should_start:
+                self.video_last_reconnect_attempt_ts = now
+        if reconnect_expired:
+            self._enter_terminal_lost_state(VIDEO_MSG_LOST)
+            return True
+        if should_start:
+            self._stop_reader_sync()
+            self.root_window.after(0, lambda: self.show_message_callback(VIDEO_MSG_RECONNECTING, color="orange"))
+            self._start_reader(target_url, reset_connection_history=False)
+            return True
+        return False
 
     def ui_update_loop(self):
         # Non-blocking UI paint loop. Called from complex_throttle.update_video_stream() method.
         # Returns immediately but re-schedules itself via the root_window.after() method
         #    1. Check if stream is still running; exit early if not
-        #    2. Drain status queue (exactly once; keep last status)
-        #    3. Drain frame queue (keep newest frame only)
-        #    4. Paint frame if available
-        #    5. Monitor for stall and trigger reconnect if needed
-        #    6. Re-schedule for 30ms later
+        #    2. If reconnecting, attempt reconnect when interval expires
+        #    3. Drain status queue (exactly once; keep last status)
+        #    4. Drain frame queue (keep newest frame only)
+        #    5. Paint frame if available
+        #    6. Monitor for stall and trigger reconnect if needed
         with self.state_lock:
             running = self.video_running
             generation = self.video_connect_generation
@@ -379,31 +487,55 @@ class VideoStreamManager:
             fq = self.video_frame_queue
             last_frame_ts = self.video_last_frame_ts
             status = self.video_status
+            reconnecting = self.video_reconnecting
+            terminal_failure = self.video_terminal_failure
         # If not running, show final status and exit
         if not running:
             if status:
                 self.show_message_callback(status, color="red")
             return
         now = time.monotonic()
-        frame_received = False
-        latest_status = None
+        # If reconnecting, attempt reconnect on schedule
+        if reconnecting and not terminal_failure:
+            self._maybe_attempt_reconnect(now)
+            with self.state_lock:
+                if not self.video_running:
+                    return
+                generation = self.video_connect_generation
+                sq = self.video_status_queue
+                fq = self.video_frame_queue
+                last_frame_ts = self.video_last_frame_ts
+        latest_status_kind = None
+        latest_status_message = None
         # 1) Drain status queue—keep only the last status message
         if sq is not None:
             try:
                 while True:
                     kind, msg_gen, message = sq.get_nowait()
-                    if kind == "status" and msg_gen == generation:
-                        latest_status = message
+                    if msg_gen == generation:
+                        latest_status_kind = kind
+                        latest_status_message = message
             except queue.Empty:
                 pass
             except Exception:
                 pass
-        # If we got a status message (e.g., "Video stream lost"), apply it immediately
-        if latest_status is not None:
+        # Apply latest status
+        if latest_status_kind == "connected":
             with self.state_lock:
-                self.video_status = latest_status
-                self.video_running = False
-            self.show_message_callback(latest_status, color="red")
+                self.video_reconnecting = False
+                self.video_terminal_failure = False
+                self.video_status = None
+                self.video_last_frame_ts = now
+                self.video_has_ever_connected = True
+        elif latest_status_kind in ("interrupted", "error", "open_failed"):
+            with self.state_lock:
+                still_running = self.video_running
+                has_ever_connected = self.video_has_ever_connected
+            if still_running:
+                if has_ever_connected:
+                    self._begin_reconnect(reason=latest_status_message)
+                else:
+                    self._enter_terminal_lost_state(VIDEO_MSG_CONNECT_FAILED)
             return
         # 2) Drain frame queue—keep only the newest frame
         newest_frame = None
@@ -419,9 +551,12 @@ class VideoStreamManager:
                 pass
         # 3) Paint if we have a frame
         if newest_frame is not None:
-            frame_received = True
             with self.state_lock:
                 self.video_last_frame_ts = now
+                self.video_reconnecting = False
+                self.video_terminal_failure = False
+                self.video_status = None
+                self.video_has_ever_connected = True
             try:
                 img = Image.fromarray(newest_frame)
                 img_tk = ImageTk.PhotoImage(image=img)
@@ -429,28 +564,38 @@ class VideoStreamManager:
                 # Caller's update_video_stream() will handle the Canvas operations
                 return img_tk
             except Exception as e:
-                logging.warning(f"VideoStreamManager - gen={generation} - Failed to render video frame: {e}")
-                with self.state_lock:
-                    self.video_status = "Video render error"
-                    self.video_running = False
-                self.show_message_callback(self.video_status, color="red")
+                logging.debug(f"VideoStreamManager - gen={generation} - Failed to render video frame: {e}")
+                self._enter_terminal_lost_state(VIDEO_MSG_RENDER_ERROR)
                 return
-        # 4) Stall watchdog: if no frame for >stall_timeout_s, mark as failed (no retry)
-        if not frame_received:
-            if now - last_frame_ts > self.video_stall_timeout_s:
+        # 4) Stall watchdog: if no frame for >VIDEO_DROP_DETECT_S, begin reconnect
+        with self.state_lock:
+            reconnecting = self.video_reconnecting
+            terminal_failure = self.video_terminal_failure
+            last_frame_ts = self.video_last_frame_ts
+        if not reconnecting and not terminal_failure:
+            if now - last_frame_ts > VIDEO_DROP_DETECT_S:
                 with self.state_lock:
-                    self.video_status = "Video connection failed"
-                    self.video_running = False
-                self.show_message_callback(self.video_status, color="red")
+                    has_ever_connected = self.video_has_ever_connected
+                logging.debug(f"VideoStreamManager - gen={generation} - No frame for {now - last_frame_ts:.3f}s")
+                if has_ever_connected:
+                    logging.debug(f"VideoStreamManager - gen={generation} - Beginning reconnect")
+                    self._begin_reconnect(reason="Frame timeout")
+                else:
+                    if now - last_frame_ts >= VIDEO_INITIAL_CONNECT_WINDOW_S:
+                        logging.warning(f"VideoStreamManager - gen={generation} - Initial connect timed out")
+                        self._enter_terminal_lost_state(VIDEO_MSG_CONNECT_FAILED)
                 return
-        # 5) Re-schedule for 30ms later
-        return None  # Caller will re-schedule
+        # 5) No frame this cycle
+        return None
 
     def cleanup(self):
         # Called on application shutdown. Safely stops all readers and clears state.
         with self.state_lock:
             self.video_running = False
+            self.video_reconnecting = False
+            self.video_terminal_failure = False
             self.video_connect_generation += 1
+            self.video_status = None
         self._stop_reader_sync()
 
 #--------------------------------------------------------------------------------------------------------
@@ -464,10 +609,10 @@ class complex_throttle(Tk.LabelFrame):
         self.pack(fill=Tk.BOTH, expand=False)
         self.root_window = root_window
         # ===== VIDEO FRAME SETUP =====
-        self.video_frame = Tk.Frame(self, bg="black", width=480, height=270)
+        self.video_frame = Tk.Frame(self, bg="black", width=VIDEO_WIDTH, height=VIDEO_HEIGHT)
         self.video_frame.pack(side=Tk.TOP, pady=5)
         self.video_frame.pack_propagate(False)
-        self.video_screen = Tk.Canvas(self.video_frame, bg="black", width=480, height=240, highlightthickness=0)
+        self.video_screen = Tk.Canvas(self.video_frame, bg="black", width=VIDEO_WIDTH, height=VIDEO_HEIGHT-30, highlightthickness=0)
         self.video_screen.pack(side=Tk.TOP, fill=Tk.X)
         self.video_canvas_image_id = self.video_screen.create_image(0, 0, anchor=Tk.NW, image=None)
         self.video_button_frame = Tk.Frame(self.video_frame, bg="black", height=30)
@@ -604,7 +749,7 @@ class complex_throttle(Tk.LabelFrame):
         # Show a message overlay in the video frame (non-blocking).
         self.video_screen.itemconfig(self.video_canvas_image_id, image="")
         self.video_screen.delete("video_msg")
-        self.video_screen.create_text(240, 135, text=text, fill=color, font=("Arial", 12), tags="video_msg")
+        self.video_screen.create_text(VIDEO_WIDTH/2, (VIDEO_HEIGHT-30)/2, text=text, fill=color, font=("Arial", 12), tags="video_msg")
 
     def update_video_stream(self):
         # UI paint loop for video (called every 30ms).

@@ -242,23 +242,46 @@ class grid_of_wifi_networks(Tk.Frame):
             widget.set_value(params_to_pass)
         # Create the "+" button for inserting rows
         add_button = Tk.Button(row_frame, text="+", height=1, width=2, padx=2, pady=0,
-                               font=('Courier', 8, "normal"), 
-                               command=lambda: self.create_row(pack_after=row_frame))
+            font=('Courier', 8, "normal"),command=lambda: self.create_row(pack_after=row_frame))
         add_button.pack(side=Tk.LEFT, padx=(10, 2))
         self.list_of_buttons.append(add_button)
         CreateToolTip(add_button, "Add new WiFi network (below)")
+
         # Create the "-" button for deleting rows (except first row)
         if len(self.list_of_subframes) > 1:
             remove_button = Tk.Button(row_frame, text="-", height=1, width=2, padx=2, pady=0,
-                    font=('Courier', 8, "normal"),command=lambda: self.delete_row(row_frame))
+                font=('Courier', 8, "normal"), command=lambda rf=row_frame: self.delete_row(rf))
             remove_button.pack(side=Tk.LEFT, padx=2)
             self.list_of_buttons.append(remove_button)
             CreateToolTip(remove_button, "Delete this WiFi network")
 
     def delete_row(self, row_frame):
-        if len(self.list_of_subframes) > 1:  # Always keep at least one row
-            row_frame.destroy()
-            self.list_of_subframes.pop()
+        if len(self.list_of_subframes) <= 1:
+            return
+        try:
+            index = self.list_of_subframes.index(row_frame)
+        except ValueError:
+            return
+        subframe = self.list_of_subframes.pop(index)
+        if index < len(self.list_of_widgets):
+            widget = self.list_of_widgets.pop(index)
+            if widget.winfo_exists():
+                widget.destroy()
+        # Remove the matching buttons for that row, if they exist
+        buttons_to_remove = []
+        for button in self.list_of_buttons:
+            try:
+                if button.master == subframe:
+                    buttons_to_remove.append(button)
+            except Exception:
+                pass
+        for button in buttons_to_remove:
+            if button in self.list_of_buttons:
+                self.list_of_buttons.remove(button)
+            if button.winfo_exists():
+                button.destroy()
+        if subframe.winfo_exists():
+            subframe.destroy()
 
     def set_values(self, values_to_set: list):
         # Destroy existing subframes
