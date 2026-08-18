@@ -636,7 +636,8 @@ def subscribe_to_mqtt_messages (message_type:str,item_node:str,item_id:int,callb
         mqtt_client.subscribe(topic)
     elif node_config["enhanced_debugging"]: logging.debug("MQTT-Client: Adding subscription topic '"+topic+"'")
     # Add to the list of subscribed topics (so we can re-subscribe on reconnection)
-    node_config["list_of_subscribed_topics"].append(topic)
+    if topic not in node_config["list_of_subscribed_topics"]:
+        node_config["list_of_subscribed_topics"].append(topic)
     # Save the callback details for when we receive a message on the topic
     node_config["callbacks"][topic] = callback
     return()

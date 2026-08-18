@@ -248,13 +248,13 @@ class LocoConfigWindow(Tk.Toplevel):
             #  Wait longer for async callbacks to fire (3 seconds)
             time.sleep(3.0)
         except Exception as e:
-            logging.Error(f"[Discovery] Error during scan: {e}")
+            logging.error(f"[Discovery] Error during scan: {e}")
         finally:
             try:
                 if zeroconf is not None:
                     zeroconf.close()
             except Exception as e:
-                logging.Error(f"[Discovery] Error closing Zeroconf: {e}")
+                logging.error(f"[Discovery] Error closing Zeroconf: {e}")
             self.scan_in_progress = False
     
     def register_discovered_camera(self, name, url):

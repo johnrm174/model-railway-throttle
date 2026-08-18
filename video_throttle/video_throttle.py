@@ -361,7 +361,7 @@ def start_throttle():
         except Tk.TclError:
             pass
         application.tk.call('set', '::tk::dialog::file::showHiddenVar', '0')
-    except:
+    except Exception:
         pass
     #---------------------------------------------------------------------------------
     # Start the Application Main Loop

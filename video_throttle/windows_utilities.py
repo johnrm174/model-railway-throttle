@@ -86,24 +86,6 @@ class ESPHomeYaml:
         elif "networks" in self.data["wifi"]:
             del self.data["wifi"]["networks"]
 
-    @property
-    def device_name(self):
-        return self.data.get("esphome", {}).get("name", "")
-
-    @device_name.setter
-    def device_name(self, value):
-        self.data.setdefault("esphome", {})
-        self.data["esphome"]["name"] = value
-
-    @property
-    def friendly_name(self):
-        return self.data.get("esphome", {}).get("friendly_name", "")
-
-    @friendly_name.setter
-    def friendly_name(self, value):
-        self.data.setdefault("esphome", {})
-        self.data["esphome"]["friendly_name"] = value
-
     #-----------------------------
     # Camera properties
     #-----------------------------
@@ -276,6 +258,10 @@ class grid_of_wifi_networks(Tk.Frame):
     def delete_row(self, row_frame):
         if len(self.list_of_subframes) > 1:  # Always keep at least one row
             row_frame.destroy()
+            # Prune destroyed entries from all tracking lists
+            self.list_of_subframes = [f for f in self.list_of_subframes if f.winfo_exists()]
+            self.list_of_widgets = [w for w in self.list_of_widgets if w.winfo_exists()]
+            self.list_of_buttons = [b for b in self.list_of_buttons if b.winfo_exists()]
 
     def set_values(self, values_to_set: list):
         # Destroy existing subframes
@@ -668,12 +654,9 @@ class CameraConfigUtility(Tk.Toplevel):
             return False
         # Validate other fields
         for widget in self.entries.values():
-            # Preferred path: widget supplies explicit is_valid().
-            if hasattr(widget, "is_valid") and callable(widget.is_valid):
-                try:
-                    if not bool(widget.is_valid):
-                        return False
-                except Exception:
+            # Preferred path: widget exposes is_valid as a bool attribute.
+            if hasattr(widget, "is_valid"):
+                if not bool(widget.is_valid):
                     return False
             # Compatibility path: trigger widget internal update hook.
             elif hasattr(widget, "validate") and callable(widget.validate):

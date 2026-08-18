@@ -146,8 +146,12 @@ class remote_dcc_throttle(Tk.LabelFrame):
             mqtt_message = {"dccaddress": self.dcc_address, "sessionid": 0}
             mqtt_interface.send_mqtt_message("dcc_locomotive_control_commands", 0, data=mqtt_message, retain=True,
                     log_message=f"Loco Control: Publishing loco control message to broker :{mqtt_message}")
-            # Schedule a timeout check to generate an error message if we don't get a response within 5 seconds
-            self.session_timeout_id = self.root_window.after(3000, lambda: messagebox.showerror("Timeout error", "Session request timeout"))
+            # Schedule a timeout check to generate an error message if we don't get a response within 3 seconds
+            def _on_session_timeout():
+                self.session_timeout_id = None
+                self.session_requested = False
+                messagebox.showerror("Timeout error", "Session request timeout")
+            self.session_timeout_id = self.root_window.after(3000, _on_session_timeout)
         else:
             messagebox.showerror("Invalid Address", "Please specify a valid DCC address")
 
