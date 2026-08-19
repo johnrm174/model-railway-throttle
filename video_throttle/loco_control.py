@@ -6,6 +6,8 @@ import numpy
 import time
 import multiprocessing
 import queue
+import os
+import soundfile
 
 import cv2  # Open Source Computer Vision Library (for cab-view video streams)
 import sounddevice  # Cross-platform audio stream management
@@ -714,14 +716,16 @@ class complex_throttle(Tk.LabelFrame):
         self.audio_sample_index = 0
         self.hiss_playback_index = 0
         self.joint_spacing = 120.0
-        self.clack_lock = threading.Lock()
         self.pending_clacks = []
         self.active_clacks = []
         self.clack_sample = numpy.array([])
+        self.pending_clacks = queue.SimpleQueue()
         # ===== PHYSICS STATE =====
         self.next_physics_loop_event = None
-        self.brake_demand_lock = threading.Lock()
-        self.power_state_lock = threading.Lock()
+        # Thread-safe scalar snapshots for audio callback reads (no locks in callback)
+        self.audio_power_snapshot = 0.0
+        self.audio_actual_brake_snapshot = 0.0
+        self.audio_brake_demand_snapshot = 100.0
         # Initialize
         self.reset_to_defaults()
         self.set_controls_disabled_state(disabled=False)
@@ -836,6 +840,13 @@ class complex_throttle(Tk.LabelFrame):
     # OTHER METHODS
     #----------------------------------------------------------------------------------------------------
 
+    def _drain_pending_clacks(self):
+        while True:
+            try:
+                self.pending_clacks.get_nowait()
+            except queue.Empty:
+                break
+
     def reset_to_defaults(self):
         # Reset all dials and state to defaults.
         self.target_throttle = 0.0
@@ -845,8 +856,8 @@ class complex_throttle(Tk.LabelFrame):
         self.current_speed = 0.0
         self.iterations = 0
         self.track_distance = 0.0
-        if hasattr(self, 'pending_clacks'): self.pending_clacks.clear()
-        if hasattr(self, 'active_clacks'): self.active_clacks.clear()
+        self._drain_pending_clacks()
+        self.active_clacks.clear()
         self.throttle_demand.set(0)
         self.brake_demand.set(100)
         self.dcc_direction = None
@@ -922,27 +933,37 @@ class complex_throttle(Tk.LabelFrame):
         # 2. Reset sound playback tracking indices
         self.audio_sample_index = 0
         self.hiss_playback_index = 0
+        self._drain_pending_clacks()
+        self.active_clacks.clear()
         # 3. Spin up the new stream if conditions are met
         if audio_enabled:
             if self.axle_offsets is None or self.axle_offsets == []:
                 self.axle_joint_indices = []
-                self.clack_sample = numpy.array([])
             else:
                 self.axle_joint_indices = [-1] * len(self.axle_offsets)
-                # Synthesize a localized rail joint impact wave
-                duration = 0.5
-                t_sample = numpy.linspace(0, duration, int(self.sample_rate * duration))
-                weight = numpy.sin(2 * numpy.pi * 40 * t_sample) * numpy.exp(-25.0 * t_sample)
-                brown_noise = numpy.cumsum(numpy.random.normal(0, 0.05, len(t_sample)))
-                brown_noise -= numpy.mean(brown_noise)
-                rumble = brown_noise * numpy.exp(-35.0 * t_sample)
-                impact = numpy.sin(2 * numpy.pi * 150 * t_sample) * numpy.exp(-120.0 * t_sample) * 0.2
-                mix = weight + rumble + impact
-                denom = numpy.max(numpy.abs(mix))
-                self.clack_sample = ((mix / denom) * 0.7) if denom > 0 else numpy.array([])
-            # Fire audio stream engine thread
+            # Load clack sample from packaged resource
             try:
-                self.audio_stream = sounddevice.OutputStream(channels=2, callback=self.audio_callback, samplerate=self.sample_rate, blocksize=8192)
+                clack_path = os.path.join(os.path.dirname(__file__), "resources", "clack.wav")
+                wav_data, wav_sr = soundfile.read(clack_path, dtype="float32")
+                if hasattr(wav_data, "ndim") and wav_data.ndim > 1:
+                    wav_data = wav_data.mean(axis=1)
+                if wav_sr != self.sample_rate and len(wav_data) > 1:
+                    old_x = numpy.linspace(0, 1, len(wav_data), endpoint=False)
+                    new_len = int(len(wav_data) * (self.sample_rate / float(wav_sr)))
+                    new_x = numpy.linspace(0, 1, max(1, new_len), endpoint=False)
+                    wav_data = numpy.interp(new_x, old_x, wav_data).astype(numpy.float32)
+                peak = float(numpy.max(numpy.abs(wav_data))) if len(wav_data) > 0 else 0.0
+                self.clack_sample = ((wav_data / peak) * 0.85).astype(numpy.float32) if peak > 0 else numpy.array([], dtype=numpy.float32)
+            except Exception as e:
+                logging.warning(f"Failed to load clack.wav resource: {e}")
+                self.clack_sample = numpy.array([], dtype=numpy.float32)
+            # Fire audio stream engine thread (small block for transient timing)
+            try:
+                self.audio_stream = sounddevice.OutputStream(
+                    channels=2,
+                    callback=self.audio_callback,
+                    samplerate=self.sample_rate,
+                    blocksize=1024)
                 self.audio_stream.start()
             except Exception as e:
                 logging.warning(f"Failed to start audio stream: {e}")
@@ -984,8 +1005,8 @@ class complex_throttle(Tk.LabelFrame):
             self.next_physics_loop_event = self.root_window.after(100, self.update_physics)
             return
         # Cache Tkinter values to primitive thread-safe states for background audio thread consumption
-        with self.brake_demand_lock:
-            self.cached_brake_demand = float(self.brake_demand.get())
+        self.cached_brake_demand = float(self.brake_demand.get())
+        self.audio_brake_demand_snapshot = self.cached_brake_demand
         # 1. Evaluate Direction Selector Interlocks (Must be static, zero power, full brakes to reverse)
         if self.current_speed == 0 and float(self.throttle_demand.get()) == 0 and self.cached_brake_demand == 100:
             self.btn_fwd.configure(state="normal")
@@ -1007,12 +1028,14 @@ class complex_throttle(Tk.LabelFrame):
         else:
             notch = round((raw_val / 100) * 8)
             self.target_throttle = (notch / 8) * 100
-        with self.power_state_lock:
-            # 4. Simulate engine spooling
-            self.actual_power += (self.target_throttle - self.actual_power) * self.traction_responsiveness
-            # 5. Simulate Brake Air Pipe Pressurisation
-            target_pressure = 100.0 - self.cached_brake_demand
-            self.actual_brake += (target_pressure - self.actual_brake) * self.brake_responsiveness
+        # 4. Simulate engine spooling
+        self.actual_power += (self.target_throttle - self.actual_power) * self.traction_responsiveness
+        # 5. Simulate Brake Air Pipe Pressurisation
+        target_pressure = 100.0 - self.cached_brake_demand
+        self.actual_brake += (target_pressure - self.actual_brake) * self.brake_responsiveness
+        # Update audio snapshots after physics update
+        self.audio_power_snapshot = self.actual_power
+        self.audio_actual_brake_snapshot = self.actual_brake
         # 6. Compute Available Tractive Effort (TE)
         # Interlock: Force TE to 0 if brakes are heavily applied (Power Cut-Out)
         if self.cached_brake_demand > 10.0 or self.actual_brake < 90.0:
@@ -1048,17 +1071,19 @@ class complex_throttle(Tk.LabelFrame):
         accel_mph_per_sec = (net_lbf / (self.total_mass * 1.1)) * 0.01097
         self.current_speed += accel_mph_per_sec * 0.1  # Exactly 100ms time step slice
         # 10. Wheel Joint Impact (Clack) Distance Tracker
-        if self.axle_offsets is not None and self.current_speed > 0.01 and len(self.axle_joint_indices) > 0:
+        if self.axle_offsets is not None and self.current_speed > 0.01 and len(self.axle_offsets) > 0:
+            if len(self.axle_joint_indices) != len(self.axle_offsets):
+                self.axle_joint_indices = [-1] * len(self.axle_offsets)
             fps = self.current_speed * 1.46667
-            self.track_distance += fps * 0.1  # Calculate precise distance covered in this 100ms cycle
+            self.track_distance += fps * 0.1
             for i, offset in enumerate(self.axle_offsets):
                 axle_pos = self.track_distance - offset
                 current_joint = int(axle_pos // self.joint_spacing)
-                # Check if a wheel-set has passed over a new rail break
                 if current_joint > self.axle_joint_indices[i]:
-                    vol = min(1.3, self.current_speed / 40.0) # Sound volume correlates with physical speed
-                    with self.clack_lock:
-                        self.pending_clacks.append([0, vol])
+                    vol = min(1.3, self.current_speed / 40.0)
+                    frac = (axle_pos / self.joint_spacing) - current_joint
+                    offset_samples = int(max(0.0, min(0.999, frac)) * frames_per_physics_step) if False else int(max(0.0, min(0.999, frac)) * (0.1 * self.sample_rate))
+                    self.pending_clacks.put((offset_samples, vol))
                     self.axle_joint_indices[i] = current_joint
         # Apply strict clamp parameters
         if self.current_speed < 0.01: self.current_speed = 0
@@ -1100,51 +1125,51 @@ class complex_throttle(Tk.LabelFrame):
 
     def generate_engine_frame(self, frames):
         sr = self.sample_rate
-        # Read power state safely from audio thread
-        with self.power_state_lock:
-            pwr = self.actual_power / 100.0
+        pwr = self.audio_power_snapshot / 100.0
+        actual_brake = self.audio_actual_brake_snapshot
+        current_brake_demand = self.audio_brake_demand_snapshot
         t = (numpy.arange(frames) + self.audio_sample_index) / sr
         self.audio_sample_index += frames
-        # Layer 1: Core square wave motor drone modifying frequency and volume dynamically with power notch
+        # Engine
         engine_audio = 0.3 * numpy.sign(numpy.sin(2 * numpy.pi * (15 + pwr * 35) * t) - 0.4)
         engine_audio *= (0.7 + 0.3 * numpy.sin(2 * numpy.pi * (3 + pwr * 8) * t)) * (0.12 + (pwr * 0.25))
-        # Layer 2: Compressed air venting hiss (triggers during brake line pressure drops)
-        hiss_audio = self.stereo_buffer[:frames, 0]
-        hiss_audio[:] = 0.0
-        # Safe thread lookup pointing to our internal numeric variable swap instead of the Tk object
-        with self.brake_demand_lock:
-            current_brake_demand = self.cached_brake_demand
-        with self.power_state_lock:
-            pressure_diff = self.actual_brake - (100.0 - current_brake_demand)
+        engine_audio = engine_audio.astype(numpy.float32)
+        # Hiss
+        hiss_audio = numpy.zeros(frames, dtype=numpy.float32)
+        pressure_diff = actual_brake - (100.0 - current_brake_demand)
         if pressure_diff > 0.5:
-            # Use modulo-based cycling instead of expensive RNG
             self.hiss_playback_index = (self.hiss_playback_index + frames * 7) % (self.hiss_buffer_len - frames - 1)
-            hiss_audio = self.pre_baked_hiss[self.hiss_playback_index : self.hiss_playback_index + frames]
-        # Layer 3: Dynamic wheel joint click mixing loop
-        clack_audio = self.stereo_buffer[:frames, 1]
-        clack_audio[:] = 0.0
-        # Drain pending clacks atomically (check + move under same lock)
-        with self.clack_lock:
-            if self.pending_clacks:
-                self.active_clacks.extend(self.pending_clacks)
-                self.pending_clacks.clear()
-        ducking_factor = 1.0        
-        for clack in self.active_clacks:
-            idx, vol = clack[0], clack[1]
-            remaining_samples = len(self.clack_sample) - idx
-            play_len = min(frames, remaining_samples)
-            if play_len > 0:
-                clack_audio[:play_len] += self.clack_sample[idx : idx + play_len] * vol
-            clack[0] += play_len
-            # Temporarily duck (lower) engine volume on sudden joint impacts for enhanced clarity/punch
-            if idx < (sr * 0.15):
-                ducking_factor = 0.35
-        self.active_clacks = [c for c in self.active_clacks if c[0] < len(self.clack_sample)]
-        # Render clean stereo out frame signals
-        self.stereo_buffer[:frames, :] = 0.0
-        d_eng = engine_audio * ducking_factor
-        self.stereo_buffer[:frames, 0] = d_eng + clack_audio + (hiss_audio * 0.3)  # Left audio channel
-        self.stereo_buffer[:frames, 1] = (d_eng * 0.4) + clack_audio + (hiss_audio * 1.0)  # Right audio channel
-        return numpy.clip(self.stereo_buffer[:frames], -1.0, 1.0)
+            hiss_audio = self.pre_baked_hiss[self.hiss_playback_index : self.hiss_playback_index + frames].astype(numpy.float32)
+        # Clacks with scheduled offsets
+        clack_audio = numpy.zeros(frames, dtype=numpy.float32)
+        # active_clacks: [sample_idx, vol, start_off]
+        while True:
+            try:
+                start_off, vol = self.pending_clacks.get_nowait()
+                self.active_clacks.append([0, float(vol), int(start_off)])
+            except queue.Empty:
+                break
+        if len(self.clack_sample) > 0:
+            for c in self.active_clacks:
+                idx, vol, start_off = c
+                if start_off >= frames:
+                    c[2] = start_off - frames
+                    continue
+                dst_start = max(0, start_off)
+                remaining_dst = frames - dst_start
+                remaining_src = len(self.clack_sample) - idx
+                play_len = min(remaining_dst, remaining_src)
+                if play_len > 0:
+                    clack_audio[dst_start:dst_start + play_len] += self.clack_sample[idx:idx + play_len] * vol *0.3
+                    c[0] += play_len
+                    c[2] = 0
+            self.active_clacks = [c for c in self.active_clacks if c[0] < len(self.clack_sample)]
+        else:
+            self.active_clacks.clear()
+        # Mix
+        out = numpy.zeros((frames, 2), dtype=numpy.float32)
+        out[:, 0] = engine_audio + clack_audio + (hiss_audio * 0.3)
+        out[:, 1] = (engine_audio * 0.4) + clack_audio + (hiss_audio * 1.0)
+        return numpy.clip(out, -1.0, 1.0)
 
 ##############################################################################################################################
