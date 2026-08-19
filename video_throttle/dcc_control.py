@@ -206,9 +206,12 @@ class remote_dcc_throttle(Tk.LabelFrame):
         if dcc_power_on:
             self.track_power_button.configure(text="Track Power: ON", bg="#2ade7a", fg="white",
                         activebackground="#20b262", activeforeground="white", state="normal")
+            self.session_button.configure(state="normal")
+
         else:
             self.track_power_button.configure(text="Track Power: OFF", bg=self.default_bg, fg=self.default_fg,
                         activebackground=self.default_abg, activeforeground=self.default_afg, state="normal")
+            self.session_button.configure(state="disabled")
 
     def request_track_power_on(self):
         # Cancel any pending timeout messages
@@ -271,7 +274,9 @@ class remote_dcc_throttle(Tk.LabelFrame):
                                     activebackground="#20b5b2", activeforeground="black", state="normal")
             # Enable Power and Session buttons when connected
             self.track_power_button.configure(state="normal")
-            self.session_button.configure(state="normal")
+            # Enable/disable the Session button depending on the state of the DCC power
+            if self.dcc_power_on: self.session_button.configure(state="normal")
+            else: self.session_button.configure(state="disabled")
         else:
             self.btn_mqtt.configure(text="MQTT: Disconnected", bg=self.default_bg, fg=self.default_fg,
                                     activebackground=self.default_abg, activeforeground=self.default_afg)
@@ -306,7 +311,7 @@ class remote_dcc_throttle(Tk.LabelFrame):
                                        +f" - DCC Power state: {dcc_power_state}")
                     self.track_power_response_received(dcc_power_state)
                 # Handle a Loco Session acknowledgement message 
-                elif dcc_address == self.dcc_address and session_id is not None:
+                elif dcc_address == self.dcc_address and session_id is not None and self.session_request_sent:
                     logging.debug(f"Loco Control: Received session acknowledgement from {source_node}: "
                                        +f"DCC Address {dcc_address}, Session ID is {session_id}")
                     self.session_request_response_received(session_id)
