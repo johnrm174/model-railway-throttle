@@ -963,7 +963,7 @@ class complex_throttle(Tk.LabelFrame):
                     channels=2,
                     callback=self.audio_callback,
                     samplerate=self.sample_rate,
-                    blocksize=1024)
+                    blocksize=2048)
                 self.audio_stream.start()
             except Exception as e:
                 logging.warning(f"Failed to start audio stream: {e}")
@@ -1121,6 +1121,7 @@ class complex_throttle(Tk.LabelFrame):
     #----------------------------------------------------------------------------------------------------
 
     def audio_callback(self, outdata, frames, time, status):
+        if status: logging.debug(f"Audio callback status: {status}")
         outdata[:] = self.generate_engine_frame(frames)
 
     def generate_engine_frame(self, frames):
