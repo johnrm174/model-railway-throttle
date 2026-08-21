@@ -1082,7 +1082,7 @@ class complex_throttle(Tk.LabelFrame):
                 if current_joint > self.axle_joint_indices[i]:
                     vol = min(1.3, self.current_speed / 40.0)
                     frac = (axle_pos / self.joint_spacing) - current_joint
-                    offset_samples = int(max(0.0, min(0.999, frac)) * frames_per_physics_step) if False else int(max(0.0, min(0.999, frac)) * (0.1 * self.sample_rate))
+                    offset_samples = int(max(0.0, min(0.999, frac)) * (0.1 * self.sample_rate))
                     self.pending_clacks.put((offset_samples, vol))
                     self.axle_joint_indices[i] = current_joint
         # Apply strict clamp parameters
