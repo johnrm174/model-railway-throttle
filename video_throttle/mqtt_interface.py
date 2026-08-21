@@ -116,7 +116,7 @@ node_config["connection_check_event"] = None            # The scheduled 'after' 
 node_config["local_ip_address"] = ""                    # Set by the 'on_connect' function
 node_config["local_hostname"] = ""                      # Set by the 'on_connect' function
 node_config["connected_to_broker"] = False              # Set by the 'on_connect' / 'on_disconnect functions
-node_config["unexpected_disconnection"] = False         # Set by the 'on_disconnect' functios
+node_config["unexpected_disconnection"] = False         # Set by the 'on_disconnect' functions
 node_config["disconnection_in_progress"] = False        # Set/cleared by the mqtt_disconnect function
 node_config["heartbeat_thread_started"] = False         # Set by the 'on_connect' function
 node_config["list_of_published_topics"] = []
@@ -144,7 +144,7 @@ heartbeats = {}
 
 #-----------------------------------------------------------------------------------------------
 # API function used by the editor to get the list of connected nodes and when they were last seen
-# This should always be called from the main Tkinter Thread
+# Note that this will always be called from functions running in the main Tkinter Thread
 #-----------------------------------------------------------------------------------------------
 
 def get_mqtt_node_status():
@@ -158,16 +158,27 @@ def get_mqtt_node_status():
 #-----------------------------------------------------------------------------------------------
 
 def find_local_ip_address():
-    test_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # Try the standard routing trick (works when connected to internet/router)
     try:
-        test_socket.connect(('10.255.255.255', 1))
-        ip_address = test_socket.getsockname()[0]
-    except:
-        logging.error("MQTT-Client: Could not retrieve local IP address")
-        ip_address = "<unknown>"
-    finally:
-        test_socket.close()
-    return(ip_address)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as test_socket:
+            # This doesn't actually send data, just checks routing
+            test_socket.connect(('10.255.255.255', 1))
+            ip_address = test_socket.getsockname()[0]
+            return(ip_address)
+    except Exception:
+        pass
+    # Fallback: Specifically look for the Hotspot interface (wlan0)
+    # This is much more reliable for a standalone DCC Signal Box
+    try:
+        # We use check_output to ask the system for the wlan0 address directly
+        cmd = "hostname -I"
+        addresses = subprocess.check_output(cmd.split()).decode().split()
+        if addresses:
+            # Return the first address found (usually wlan0 in hotspot mode)
+            return(addresses[0])
+    except Exception:
+        pass
+    return("<unknown>")
 
 #-----------------------------------------------------------------------------------------------
 # Thread to publish MQTT Messages (to ensure the main Tkinter thread is non-blocking)
@@ -185,58 +196,68 @@ def mqtt_publish_thread():
             topic, payload, retain, qos = task
             # This is the signal to disconnect from the broker after all current messages have been published
             if topic == "DISCONNECT":
-                with node_config_thread_lock:
-                    node_config["disconnection_in_progress"] = True
+                # Although the node_config["disconnection_in_progress"] boolean is used across multiple threads
+                # we don't bother with the node_config_thread_lock as the boolean value itself is threadsafe.
+                node_config["disconnection_in_progress"] = True
                 common.execute_function_in_tkinter_thread(lambda:mqtt_disconnect_stage0())
             else:
-                success, retries = False, 0
+                success, publish_attempt = False, 1
                 # Only attempt the publish if we are connected to the broker. as we might have disconnected
                 # between the time the message was put on the publish queue and the time we go to publish it.
                 # We attempt to publish 5 times before discarding the message
-                while not success and retries < 5:
+                while not success and publish_attempt < 5:
+                    # Although we use the node_config_thread_lock to take a snapshot of the latest connection
+                    # status we're happy to commit to publish the message based on that snapshot rather than
+                    # hold the lock until we have completed the transmit. This is because a disconnection could
+                    # happen at any time (completely out of our control), so we still have to use a try/except
+                    # block to handle any failures gracefully (it wouldn't matter if we had the lock or not).
                     with node_config_thread_lock:
                         connected = node_config["connected_to_broker"]
                         disconnecting = node_config["disconnection_in_progress"]
                     if connected and not disconnecting:
                         try:
                             info = mqtt_client.publish(topic, payload, retain=retain, qos=qos)
-                            # Wait with a timeout 0f 5 seconds (prevents a permanent hang)
+                            # Wait with a timeout 0f 1 second (prevents a permanent hang)
                             # With a QOS of 1, this waits for the PUBACK message from the broker
                             info.wait_for_publish(timeout=1.0)
                             # Check whether we have successfully published the message or not
                             if info.is_published():
                                 success = True
-                                if retries > 0:
-                                    logging.warning(f"MQTT Interface: Publish succeeded (attempt {retries})")
+                                if publish_attempt > 1:
+                                    logging.warning(f"MQTT Interface: Publish succeeded (attempt {publish_attempt})")
                             else:
-                                logging.warning(f"MQTT Interface: Publish failed (attempt {retries})")
-                                retries += 1
+                                logging.warning(f"MQTT Interface: Publish failed (attempt {publish_attempt})")
+                                publish_attempt += 1
                         except Exception as exception:
-                            logging.error(f"MQTT Interface: Publish Exception: {exception} (attempt {retries})")
-                            retries += 1
+                            logging.error(f"MQTT Interface: Publish Exception: {exception} (attempt {publish_attempt})")
+                            publish_attempt += 1
                             time.sleep(1.0)
                     else:
                         time.sleep(1.0)
-                        retries += 1
+                        publish_attempt += 1
                 if not success:
-                    with node_config_thread_lock:
-                        connected = node_config["connected_to_broker"]
-                    if connected:
+                    # Although the node_config["connected_to_broker"] boolean is used across multiple threads
+                    # we don't bother with the node_config_thread_lock as the boolean value itself is threadsafe.
+                    if node_config["connected_to_broker"]:
                         logging.error(f"MQTT Interface: Permanently failed to publish to {topic} - Broker still connected")
                     else:
                         logging.error(f"MQTT Interface: Permanently failed to publish to {topic} - Broker is disconnected")
         except Exception as exception:
             # This catches the "unthinkable" errors (e.g. 'task' unpacking failed)
-            logging.critical(f"MQTT Interface: CRITICAL THREAD ERROR: {exception}")
+            logging.error(f"MQTT Interface: CRITICAL THREAD ERROR: {exception}")
             # Brief sleep to prevent a "rapid-fire" crash loop if the error persists
             time.sleep(0.5)
 
 threading.Thread(target=mqtt_publish_thread, daemon=True).start()
 
 #-----------------------------------------------------------------------------------------------
-# Internal function to send out a heartbeat message from the node and then schedule a
-# subsequent call to the function (according to the 'heartbeat_frequency') in the main
-# Tkinter Thread via the root.after method. Initially called by the 'on_connect' function.
+# Internal function to send out a heartbeat message from the node and then schedule the
+# next heartbeat (according to the 'heartbeat_frequency'). This runs in the main Tkinter
+# Thread. Initially called by the 'on_connect' function (and then runs forever).
+# Although the node_config["connected_to_broker"] element is used across multiple threads
+# we don't bother to use the node_config_thread_lock as we're happy to commit to sending the
+# heartbeat message to the Tx thread anyway (there is another 'connected' check there)
+# All other node_config elements are only updated by functions running in the Tkinter Thread.
 #-----------------------------------------------------------------------------------------------
 
 def publish_heartbeat_message():
@@ -282,26 +303,33 @@ def split_remote_item_identifier(item_identifier:str):
 #-----------------------------------------------------------------------------------------------
 
 def on_log(mqtt_client, obj, level, mqtt_log_message):
+    # Although the node_config["mqtt_client_debug"] element is used across multiple threads
+    # we don't bother to use the node_config_thread_lock as we're happy to log anyway
     if node_config["mqtt_client_debug"]: logging.debug("MQTT-Client: "+mqtt_log_message)
     return()
 
 #-----------------------------------------------------------------------------------------------
 # MQTT client call-back call-back to process broker disconnection events
+# Note the use of the node_config_thread_lock to update/read the config
 #-----------------------------------------------------------------------------------------------
 
 def on_disconnect(mqtt_client, userdata, rc):
     global node_config
     if rc==0:
         logging.info("MQTT-Client - Broker connection successfully terminated")
-        node_config["unexpected_disconnection"] = False
+        with node_config_thread_lock:
+            node_config["unexpected_disconnection"] = False
+            node_config["connected_to_broker"] = False
     else:
         logging.warning("MQTT-Client: Unexpected disconnection from broker")
-        node_config["unexpected_disconnection"] = True
-    with node_config_thread_lock:
-        node_config["connected_to_broker"] = False
-    # Update the main application on the status of the connection
-    if node_config["status_callback"] is not None:
-        common.execute_function_in_tkinter_thread(lambda:node_config["status_callback"](False))
+        with node_config_thread_lock:
+            node_config["unexpected_disconnection"] = True
+            node_config["connected_to_broker"] = False
+    # Update the main application on the status of the connection. Note that
+    # we take a snapshot from the node_config to ensure thread safe useage
+    callback_to_make = node_config["status_callback"]
+    if callback_to_make is not None:
+        common.execute_function_in_tkinter_thread(lambda:callback_to_make(False))
     return()
 
 #-----------------------------------------------------------------------------------------------
@@ -311,14 +339,20 @@ def on_disconnect(mqtt_client, userdata, rc):
 def on_connect(mqtt_client, userdata, flags, rc):
     global node_config
     if rc == 0:
-        if node_config["unexpected_disconnection"] == True:
-            logging.warning("MQTT-Client - Successfully connected to MQTT Broker after unexpected disconnect")
-        else:
-            logging.info("MQTT-Client - Successfully connected to MQTT Broker")
+        # We use the node_config_thread_lock for reading/updating the "status" flags as required
+        with node_config_thread_lock:
+            # Set the flag to report a successful connection
+            node_config["connected_to_broker"] = True
+            # Identify whether this is a new connection or a re-connection
+            if node_config["unexpected_disconnection"] == True:
+                logging.warning("MQTT-Client - Successfully connected to MQTT Broker after unexpected disconnect")
+            else:
+                logging.info("MQTT-Client - Successfully connected to MQTT Broker")
+            node_config["unexpected_disconnection"] = False
         # Find the hostname and assigned IP address of the machine we are running on (for the heartbeat messages)
+        # We don't use the node_config_thread_lock as these elements are only updated by the main Tkinter Thread
         node_config["local_ip_address"] = find_local_ip_address()
         node_config["local_hostname"] = socket.gethostname()
-        node_config["unexpected_disconnection"] = False
         # Pause just to ensure that MQTT is all fully up and running before we continue (and allow the client
         # to set up any subscriptions or publish any messages to the broker). We shouldn't need to do this but
         # I've experienced problems running on a Windows 10 platform if we don't include a short sleep
@@ -341,20 +375,20 @@ def on_connect(mqtt_client, userdata, flags, rc):
         shutdown_topic = "shutdown"+"/"+node_config["network_identifier"]
         if node_config["enhanced_debugging"]: logging.debug("MQTT-Client: Subscribing to: '"+shutdown_topic+"' from Broker")
         mqtt_client.subscribe(shutdown_topic)
-        # Set the flag to report a successful connection
-        with node_config_thread_lock:
-            node_config["connected_to_broker"] = True
         # Start the heartbeat 'loop' (not really a thread - uses the root.after() method)
         # Note that we start this 'loop' in the main Tkinter Thread
         if not node_config["heartbeat_thread_started"]:
             common.execute_function_in_tkinter_thread(lambda:publish_heartbeat_message())
             node_config["heartbeat_thread_started"] = True
+        # Update the main application on the status of the connection. Note that
+        # we take a snapshot from the node_config to ensure thread safe useage
+        callback_to_make = node_config["status_callback"]
+        if callback_to_make is not None:
+            common.execute_function_in_tkinter_thread(lambda:callback_to_make(True))
         # Call the function to transmit the current state of all library objects
         # this is to synchronise objects across the entire signalling network
         common.execute_function_in_tkinter_thread(lambda:common.mqtt_transmit_all())
-        # Update the main application on the status of the connection
-        if node_config["status_callback"] is not None:
-            common.execute_function_in_tkinter_thread(lambda:node_config["status_callback"](True))
+    # Deal with the various connection errors that may have arisen
     elif rc == 1: logging.error("MQTT-Client: Connection refused – incorrect protocol version")
     elif rc == 2: logging.error("MQTT-Client: Connection refused – invalid client identifier")
     elif rc == 3: logging.error("MQTT-Client: Connection refused – server unavailable")
@@ -577,6 +611,7 @@ def mqtt_broker_disconnect():
         logging.debug("MQTT-Client: Initiating broker disconnect")
         # Clean out the message queues on the broker by publishing null messages (empty strings)
         # to each of the topics that we have sent messages to during the lifetime of the session
+        # Note we use the thread lock to stop the "list_of_published_topics" changing under us
         with node_config_thread_lock:
             topics_to_purge = list(node_config["list_of_published_topics"])
         if len(topics_to_purge)>0:
@@ -600,8 +635,7 @@ def mqtt_broker_disconnect():
 
 def mqtt_disconnect_stage0():
     logging.debug("MQTT-Client: Disconnecting from broker")
-    with node_config_thread_lock:
-        node_config["connected_to_broker"] = False
+    node_config["connected_to_broker"] = False
     common.root_window.after(100,lambda:mqtt_disconnect_stage1())
     # Cancel the connection_timeout_check (scheduled from the connect function)
     connection_timeout_check_scheduled = node_config["connection_check_event"]
@@ -611,19 +645,18 @@ def mqtt_disconnect_stage0():
 
 def mqtt_disconnect_stage1():
     global mqtt_client
-    mqtt_client.disconnect()
+    if mqtt_client is not None: mqtt_client.disconnect()
     common.root_window.after(100,lambda:mqtt_disconnect_stage2())
 
 def mqtt_disconnect_stage2():
     global mqtt_client
-    mqtt_client.loop_stop()
+     if mqtt_client is not None: mqtt_client.loop_stop()
     common.root_window.after(100, lambda:mqtt_disconnect_stage3())
 
 def mqtt_disconnect_stage3():
     global mqtt_client
     mqtt_client= None
-    with node_config_thread_lock:
-        node_config["disconnection_in_progress"] = False
+    node_config["disconnection_in_progress"] = False
 
 #-----------------------------------------------------------------------------------------------
 # Externally called function to publish a 'shutdown' message to other network nodes.
@@ -666,7 +699,8 @@ def subscribe_to_mqtt_messages (message_type:str,item_node:str,item_id:int,callb
         if node_config["enhanced_debugging"]: logging.debug("MQTT-Client: Subscribing to '"+topic+"' from Broker")
         mqtt_client.subscribe(topic)
     elif node_config["enhanced_debugging"]: logging.debug("MQTT-Client: Adding subscription topic '"+topic+"'")
-    # Add to the list of subscribed topics (so we can re-subscribe on reconnection)
+    # Add to the list of subscribed topics (so we can re-subscribe on reconnection) and callbacks
+    # Note we use the node_config_thread_lock to protect the update of the list / dictionary
     with node_config_thread_lock:
         subscribed_topics = node_config["list_of_subscribed_topics"]
         if topic not in subscribed_topics:
@@ -700,6 +734,7 @@ def send_mqtt_message (message_type:str,item_id:int,data:dict,log_message:str=No
         mqtt_publish_queue.put((topic,payload,retain,1))
         # Add to the list of published topics so we can 'Clean up'
         # the MQTT broker by publishing empty messages on shutdown
+        # Note we use the thread lock to update the list
         with node_config_thread_lock:
             if topic not in node_config["list_of_published_topics"]:
                 node_config["list_of_published_topics"].append(topic)
@@ -720,6 +755,7 @@ def unsubscribe_from_message_type(message_type:str):
     # Topic format: "<Message-Type>/<Network-ID>/<Item_Identifier>/<optional-subtopic>"
     # Finally, remove all instances of the message type from the internal subscriptions list
     # Note we don't iterate through the list to remove items as it will change under us
+    # Note we use the node_config_thread_lock to update the list/and callback dict
     topics_to_unsubscribe = []
     with node_config_thread_lock:
         new_list_of_subscribed_topics = []
@@ -731,14 +767,13 @@ def unsubscribe_from_message_type(message_type:str):
                 new_list_of_subscribed_topics.append(subscribed_topic)
         node_config["list_of_subscribed_topics"] = new_list_of_subscribed_topics
     for subscribed_topic in topics_to_unsubscribe:
-        with node_config_thread_lock:
-            enhanced_debugging = node_config["enhanced_debugging"]
-            connected_to_broker = node_config["connected_to_broker"]
-        if enhanced_debugging:
+        if node_config["enhanced_debugging"]:
             logging.debug("MQTT-Client: Unsubscribing from topic '"+subscribed_topic+"'")
         # Only unsubscribe if connected to the broker(if the client is disconnected
         # from the broker then all subscriptions will already have been terminated)
-        if connected_to_broker:
+        # Note that we're happy to proceed based on the snapshot of the 'connected_to_broker'
+        # and not use the node_config_thread_lock as disconnections could happen at anytime
+        if node_config["connected_to_broker"]:
             mqtt_client.unsubscribe(subscribed_topic)
     return()
 
